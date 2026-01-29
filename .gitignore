@@ -1,0 +1,23 @@
+# Arduino IDE
+.arduino15/
+.build/
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.uf2
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# C++ Objects
+*.o
+*.obj

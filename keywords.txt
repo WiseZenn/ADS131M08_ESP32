@@ -1,0 +1,26 @@
+#######################################
+# Syntax Coloring Map for ADS131M08
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+ADS131M08	KEYWORD1
+ADS131Data	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+isDataReady	KEYWORD2
+readData	KEYWORD2
+rawToVoltage	KEYWORD2
+rawToMillivolts	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+ADS131_NUM_CHANNELS	LITERAL1

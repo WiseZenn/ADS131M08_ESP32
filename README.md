@@ -22,7 +22,11 @@ High-performance Arduino library for the **Texas Instruments ADS131M08** (8-Chan
 
 ![Wiring Diagram](extras/ADS131M08.png)
 
-*For detailed schematic information, please refer to [ADS131M08原理图.pdf](extras/ADS131M08原理图.pdf)*
+*For detailed schematic information, please refer to [ADS131M08_Schematic.pdf](extras/ADS131M08_Schematic.pdf)*
+
+## 🔗 Documentation
+
+- **Official Datasheet & Product Page**: [Texas Instruments ADS131M08](https://www.ti.com.cn/product/cn/ADS131M08)
 
 ### Pin Mapping (ESP32-S3 R8 Example)
 

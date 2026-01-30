@@ -4,6 +4,8 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-1.0.0-orange.svg)](library.properties)
 
+[🇺🇸 English](README.md) | [🇨🇳 中文](README_CN.md)
+
 High-performance Arduino library for the **Texas Instruments ADS131M08** (8-Channel, 24-bit Delta-Sigma ADC), specifically optimized for the **ESP32/ESP32-S3** microcontroller.
 
 > **Key Feature**: This library generates the required 8.192MHz (or 8MHz) master clock (MCLK) directly using the ESP32's **LEDC (PWM)** peripheral, eliminating the need for an external crystal oscillator.

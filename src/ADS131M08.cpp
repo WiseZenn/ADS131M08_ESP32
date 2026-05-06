@@ -1,16 +1,17 @@
 /**
  * @file ADS131M08.cpp
- * @brief ADS131M08 8-Channel Delta-Sigma ADC Driver for ESP32.
- * @author WiseZenn
- * @license MIT
+ * @brief Implementation of the ADS131M08 Library.
  */
 
 #include "ADS131M08.h"
-#include "driver/ledc.h"
 
 ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin)
     : _pin_clk(clk_pin), _pin_cs(cs_pin), _pin_drdy(drdy_pin),
-      _pin_mosi(mosi_pin), _pin_miso(miso_pin), _pin_sclk(sclk_pin), _spi(nullptr) {}
+      _pin_mosi(mosi_pin), _pin_miso(miso_pin), _pin_sclk(sclk_pin), 
+      _spi(nullptr), _currentGain(ADS131_GAIN_1X), 
+      _spiSettings(4000000, MSBFIRST, SPI_MODE1) { // Mode 1 is mandatory for ADS131M08
+    memset(_offsets, 0, sizeof(_offsets));
+}
 
 ADS131M08::~ADS131M08() {
     if (_spi) {
@@ -20,96 +21,211 @@ ADS131M08::~ADS131M08() {
     }
 }
 
-void ADS131M08::_startClock() {
-    // Configure High-Speed (8MHz) Clock Output using LEDC
-    // This provides the Master Clock (MCLK) required by the ADS131.
-    // Note: This implementation uses ESP-IDF specific LEDC API suitable for ESP32/ESP32-S3.
-    // Ensure compatibility with your Arduino ESP32 Core version.
-    
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_LOW_SPEED_MODE,
-        .duty_resolution  = LEDC_TIMER_2_BIT, // Lower resolution allows higher freq
-        .timer_num        = LEDC_TIMER_0,
-        .freq_hz          = 8000000,          // 8 MHz
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ledc_timer_config(&ledc_timer);
-
-    ledc_channel_config_t ledc_channel = {
-        .gpio_num       = _pin_clk,
-        .speed_mode     = LEDC_LOW_SPEED_MODE,
-        .channel        = LEDC_CHANNEL_0,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .timer_sel      = LEDC_TIMER_0,
-        .duty           = 2, // 50% duty cycle (2 out of 4)
-        .hpoint         = 0
-    };
-    ledc_channel_config(&ledc_channel);
+void ADS131M08::_startMasterClock() {
+    // Generate 8MHz MCLK using ESP32 LEDC.
+    // Must use 2-bit resolution: APB_CLK=80MHz, 80MHz/(2.5*4)=8MHz.
+    // 8-bit resolution would cap output at ~312.5kHz (below ADC minimum 1MHz).
+    ledcAttach(_pin_clk, 8000000, 2);
+    ledcWrite(_pin_clk, 2); // 50% duty (2 out of 0..3)
 }
 
-void ADS131M08::begin() {
-    // 1. Start External Clock
-    _startClock();
-    delay(100); // Wait for clock to stabilize
+bool ADS131M08::begin() {
+    // 1. Start External Clock for ADC
+    _startMasterClock();
+    delay(50); // Allow clock and internal 1.8V LDO to stabilize
 
-    // 2. Initialize Control Pins
+    // 2. Initialize GPIOs
     pinMode(_pin_cs, OUTPUT);
-    digitalWrite(_pin_cs, HIGH); // Deselect
+    digitalWrite(_pin_cs, HIGH); 
+    pinMode(_pin_drdy, INPUT); // Do NOT use pull-up, DRDY is actively driven by default
 
-    pinMode(_pin_drdy, INPUT);
-
-    // 3. Initialize SPI Bus
-    // Note: Using FSPI for ESP32-S3. If using classic ESP32, this often maps to VSPI.
-    // Adjust SPIClass instantiation if necessary for your board design.
+    // 3. Initialize SPI
     _spi = new SPIClass(FSPI);
     _spi->begin(_pin_sclk, _pin_miso, _pin_mosi, _pin_cs);
-    delay(100);
+    delay(10);
+
+    // 4. Send Software Reset Command (0x0011)
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    _txBuf[0] = 0x00;
+    _txBuf[1] = 0x11;
+    _transferFrame();
+    delay(50); // Wait for reset to complete
+
+    // 4b. Send UNLOCK Command (0x0655) to enable register writes
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    _txBuf[0] = 0x06;
+    _txBuf[1] = 0x55;
+    _transferFrame();
+    delayMicroseconds(50);
+
+    // 5. Verify communication by reading the ID register
+    uint16_t idReg = 0;
+    if (!readRegister(ADS131_REG_ID, idReg)) {
+        return false;
+    }
+    
+    // Check if the fixed bits in the ID register match (Bits 15:12 should be 0010b = 0x2)
+    if ((idReg >> 12) != 0x02) {
+        return false;
+    }
+
+    return true;
+}
+
+void ADS131M08::_transferFrame() {
+    _spi->beginTransaction(_spiSettings);
+    digitalWrite(_pin_cs, LOW);
+    
+    // Transfer exactly 30 bytes (10 words * 3 bytes)
+    _spi->transferBytes(_txBuf, _rxBuf, ADS131_FRAME_BYTES);
+    
+    digitalWrite(_pin_cs, HIGH);
+    _spi->endTransaction();
+}
+
+bool ADS131M08::writeRegister(uint8_t regAddr, uint16_t regData) {
+    if (regAddr > 0x3F) return false;
+    
+    // WREG Command Format: 011a aaaa annn nnnn 
+    // a = address, n = number of registers minus 1 (0 for 1 register)
+    uint16_t cmd = 0x6000 | (regAddr << 7);
+    
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    
+    // Word 0: Command
+    _txBuf[0] = (cmd >> 8) & 0xFF;
+    _txBuf[1] = cmd & 0xFF;
+    _txBuf[2] = 0x00;
+    
+    // Word 1: Register Data
+    _txBuf[3] = (regData >> 8) & 0xFF;
+    _txBuf[4] = regData & 0xFF;
+    _txBuf[5] = 0x00;
+    
+    _transferFrame();
+    delayMicroseconds(50); // Small delay to allow ADC to process
+    return true;
+}
+
+bool ADS131M08::readRegister(uint8_t regAddr, uint16_t &regData) {
+    if (regAddr > 0x3F) return false;
+    
+    // RREG Command Format: 101a aaaa annn nnnn 
+    uint16_t cmd = 0xA000 | (regAddr << 7);
+    
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    
+    // First Frame: Send Read Command
+    _txBuf[0] = (cmd >> 8) & 0xFF;
+    _txBuf[1] = cmd & 0xFF;
+    _txBuf[2] = 0x00;
+    _transferFrame();
+    delayMicroseconds(50);
+    
+    // Second Frame: Send NULL (all 0s) to clock out the response
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    _transferFrame();
+    
+    // The response is located in Word 0 of the second frame
+    regData = (_rxBuf[0] << 8) | _rxBuf[1];
+    return true;
+}
+
+bool ADS131M08::setGain(ADS131_Gain_t gain) {
+    uint16_t g = (uint16_t)gain;
+    uint16_t regData = (g << 12) | (g << 8) | (g << 4) | g;
+
+    if (!writeRegister(ADS131_REG_GAIN1, regData)) return false;
+    if (!writeRegister(ADS131_REG_GAIN2, regData)) return false;
+
+    // Readback verification (pipeline: WREG response arrives in next frame)
+    delayMicroseconds(100);
+    uint16_t rb1 = 0, rb2 = 0;
+    if (readRegister(ADS131_REG_GAIN1, rb1) &&
+        readRegister(ADS131_REG_GAIN2, rb2)) {
+        if (rb1 == regData && rb2 == regData) {
+            _currentGain = gain;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ADS131M08::setOSR(ADS131_OSR_t osr) {
+    uint16_t clockReg = 0;
+    if (!readRegister(ADS131_REG_CLOCK, clockReg)) return false;
+
+    // Clear OSR bits [4:2] and set new OSR
+    clockReg &= ~(0b111 << 2); 
+    clockReg |= (osr << 2);
+
+    return writeRegister(ADS131_REG_CLOCK, clockReg);
 }
 
 bool ADS131M08::isDataReady() {
-    // DRDY goes LOW when new data is ready
     return digitalRead(_pin_drdy) == LOW;
 }
 
 int32_t ADS131M08::_signExtend24(uint32_t raw) {
-    // If the 24th bit (sign bit) is set, extend the sign to the upper 8 bytes
+    // Extend 24-bit two's complement to 32-bit
     if (raw & 0x800000) {
         return (int32_t)(raw | 0xFF000000);
     }
     return (int32_t)raw;
 }
 
-bool ADS131M08::readData(ADS131Data &data) {
+bool ADS131M08::readData(ADS131M08_Data &data) {
     if (!isDataReady()) return false;
 
-    // SPI Transaction (4MHz, MSB First, Mode 1)
-    _spi->beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE1));
-    digitalWrite(_pin_cs, LOW);
-    
-    // Transfer entire frame of 27 bytes (null tx buffer means we send 0x00)
-    _spi->transferBytes(nullptr, _rxBuf, ADS131_FRAME_BYTES);
-    
-    digitalWrite(_pin_cs, HIGH);
-    _spi->endTransaction();
+    // Send NULL command to read data
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    _transferFrame();
 
-    // Parse Response
-    // Frame: [Status (24bit)] [Ch0 (24bit)] [Ch1] ... [Ch7]
-    // Indices: Status=0,1,2; Ch0=3,4,5; ...
+    // Parse channel data starting from Word 1 (byte 3)
     for (int i = 0; i < ADS131_NUM_CHANNELS; i++) {
         int base = 3 + (i * 3);
         uint32_t raw = ((uint32_t)_rxBuf[base] << 16) |
                        ((uint32_t)_rxBuf[base + 1] << 8) |
                        _rxBuf[base + 2];
-        data.ch[i] = _signExtend24(raw);
+        
+        data.ch[i] = _signExtend24(raw) - _offsets[i];
     }
     return true;
 }
 
-float ADS131M08::rawToVoltage(int32_t raw) {
-    // V = (Raw Code / 2^23) * Vref
-    return (float)raw * (ADS131_V_REF / ADS131_RESOLUTION);
+void ADS131M08::calibrate(uint16_t samples) {
+    long sums[ADS131_NUM_CHANNELS] = {0};
+    memset(_offsets, 0, sizeof(_offsets));
+
+    for (uint16_t k = 0; k < samples; k++) {
+        // Use yield() instead of delay(1) to prevent RTOS watchdog trigger 
+        // and to avoid missing fast DRDY pulses.
+        while (!isDataReady()) { yield(); } 
+        
+        ADS131M08_Data tempData;
+        readData(tempData); 
+        
+        for (int i = 0; i < ADS131_NUM_CHANNELS; i++) {
+            sums[i] += tempData.ch[i];
+        }
+    }
+
+    for (int i = 0; i < ADS131_NUM_CHANNELS; i++) {
+        _offsets[i] = sums[i] / samples;
+    }
 }
 
-float ADS131M08::rawToMillivolts(int32_t raw) {
-    return rawToVoltage(raw) * 1000.0f;
+float ADS131M08::rawToVoltage(int32_t raw) {
+    float gainMultiplier = 1.0f;
+    switch (_currentGain) {
+        case ADS131_GAIN_1X:   gainMultiplier = 1.0f;   break;
+        case ADS131_GAIN_2X:   gainMultiplier = 2.0f;   break;
+        case ADS131_GAIN_4X:   gainMultiplier = 4.0f;   break;
+        case ADS131_GAIN_8X:   gainMultiplier = 8.0f;   break;
+        case ADS131_GAIN_16X:  gainMultiplier = 16.0f;  break;
+        case ADS131_GAIN_32X:  gainMultiplier = 32.0f;  break;
+        case ADS131_GAIN_64X:  gainMultiplier = 64.0f;  break;
+        case ADS131_GAIN_128X: gainMultiplier = 128.0f; break;
+    }
+    return ((float)raw / ADS131_RESOLUTION) * (ADS131_V_REF / gainMultiplier);
 }

@@ -22,11 +22,12 @@ ADS131M08::~ADS131M08() {
 }
 
 void ADS131M08::_startMasterClock() {
-    // Generate 8MHz MCLK using ESP32 LEDC.
-    // Must use 2-bit resolution: APB_CLK=80MHz, 80MHz/(2.5*4)=8MHz.
-    // 8-bit resolution would cap output at ~312.5kHz (below ADC minimum 1MHz).
-    ledcAttach(_pin_clk, 8000000, 2);
-    ledcWrite(_pin_clk, 2); // 50% duty (2 out of 0..3)
+    // Generate 8MHz MCLK using ESP32 LEDC with 1-bit resolution.
+    // APB_CLK=80MHz, f_out = 80MHz / (2^1 × divider).
+    // divider=5 gives exactly 8.000 MHz (80/10=8), no rounding error.
+    // 2-bit resolution would need divider=2.5 (non-integer), giving ±20% error.
+    ledcAttach(_pin_clk, 8000000, 1);
+    ledcWrite(_pin_clk, 1); // 50% duty (1 out of 0..1)
 }
 
 bool ADS131M08::begin() {

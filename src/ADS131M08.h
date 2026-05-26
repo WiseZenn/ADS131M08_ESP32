@@ -68,14 +68,18 @@ class ADS131M08 {
 public:
     /**
      * @brief Constructor
-     * @param clk_pin  ESP32 pin to generate 8MHz Master Clock (MCLK)
+     * @param clk_pin  ESP32 pin for 8MHz MCLK. Pass -1 if using external clock source.
      * @param cs_pin   SPI Chip Select (CS) pin
-     * @param drdy_pin Data Ready (DRDY) interrupt pin
+     * @param drdy_pin Data Ready (DRDY) pin
      * @param mosi_pin SPI MOSI pin
      * @param miso_pin SPI MISO pin
      * @param sclk_pin SPI SCLK pin
+     * @param spiBus   SPIClass pointer (default &SPI, the global Arduino SPI object).
+     *                 The board package auto-creates &SPI with the correct bus for each platform
+     *                 (VSPI on standard ESP32, FSPI on ESP32-S3, etc.).
+     *                 Pass &SPI1, &SPI2, etc. to use a different bus if needed.
      */
-    ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin);
+    ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, SPIClass *spiBus = &SPI);
     ~ADS131M08();
 
     /**
@@ -123,7 +127,7 @@ public:
 
 private:
     int8_t _pin_clk, _pin_cs, _pin_drdy, _pin_mosi, _pin_miso, _pin_sclk;
-    SPIClass *_spi;
+    SPIClass *_spi; // Pointer to user-provided SPI bus (dependency injection)
     SPISettings _spiSettings;
     
     uint8_t _txBuf[ADS131_FRAME_BYTES];

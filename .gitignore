@@ -21,3 +21,10 @@ Thumbs.db
 # C++ Objects
 *.o
 *.obj
+
+# Datasheet & binary extras
+extras/ads131m08
+
+# Issues
+Issues
+examples/IssueDiagnostic

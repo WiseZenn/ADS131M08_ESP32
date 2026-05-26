@@ -5,20 +5,16 @@
 
 #include "ADS131M08.h"
 
-ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin)
+ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, SPIClass *spiBus)
     : _pin_clk(clk_pin), _pin_cs(cs_pin), _pin_drdy(drdy_pin),
-      _pin_mosi(mosi_pin), _pin_miso(miso_pin), _pin_sclk(sclk_pin), 
-      _spi(nullptr), _currentGain(ADS131_GAIN_1X), 
-      _spiSettings(4000000, MSBFIRST, SPI_MODE1) { // Mode 1 is mandatory for ADS131M08
+      _pin_mosi(mosi_pin), _pin_miso(miso_pin), _pin_sclk(sclk_pin),
+      _spi(spiBus), _currentGain(ADS131_GAIN_1X),
+      _spiSettings(16000000, MSBFIRST, SPI_MODE1) { // Mode 1 is mandatory; 16 MHz SPI (max 25 MHz per datasheet t_C(SC)=40ns @ DVDD 2.7-3.6V)
     memset(_offsets, 0, sizeof(_offsets));
 }
 
 ADS131M08::~ADS131M08() {
-    if (_spi) {
-        _spi->end();
-        delete _spi;
-        _spi = nullptr;
-    }
+    _spi = nullptr; // We don't own the SPI object
 }
 
 void ADS131M08::_startMasterClock() {
@@ -31,17 +27,18 @@ void ADS131M08::_startMasterClock() {
 }
 
 bool ADS131M08::begin() {
-    // 1. Start External Clock for ADC
-    _startMasterClock();
-    delay(50); // Allow clock and internal 1.8V LDO to stabilize
+    // 1. Start Master Clock (skip if using external clock, clk_pin = -1)
+    if (_pin_clk >= 0) {
+        _startMasterClock();
+        delay(50); // Allow clock and internal 1.8V LDO to stabilize
+    }
 
     // 2. Initialize GPIOs
     pinMode(_pin_cs, OUTPUT);
-    digitalWrite(_pin_cs, HIGH); 
+    digitalWrite(_pin_cs, HIGH);
     pinMode(_pin_drdy, INPUT); // Do NOT use pull-up, DRDY is actively driven by default
 
-    // 3. Initialize SPI
-    _spi = new SPIClass(FSPI);
+    // 3. Initialize SPI with user-provided pins
     _spi->begin(_pin_sclk, _pin_miso, _pin_mosi, _pin_cs);
     delay(10);
 

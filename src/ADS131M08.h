@@ -68,18 +68,21 @@ class ADS131M08 {
 public:
     /**
      * @brief Constructor
-     * @param clk_pin  ESP32 pin for 8MHz MCLK. Pass -1 if using external clock source.
-     * @param cs_pin   SPI Chip Select (CS) pin
-     * @param drdy_pin Data Ready (DRDY) pin
-     * @param mosi_pin SPI MOSI pin
-     * @param miso_pin SPI MISO pin
-     * @param sclk_pin SPI SCLK pin
-     * @param spiBus   SPIClass pointer (default &SPI, the global Arduino SPI object).
-     *                 The board package auto-creates &SPI with the correct bus for each platform
-     *                 (VSPI on standard ESP32, FSPI on ESP32-S3, etc.).
-     *                 Pass &SPI1, &SPI2, etc. to use a different bus if needed.
+     * @param clk_pin   ESP32 pin for 8MHz MCLK. Pass -1 if using external clock source.
+     * @param cs_pin    SPI Chip Select (CS) pin
+     * @param drdy_pin  Data Ready (DRDY) pin
+     * @param mosi_pin  SPI MOSI pin
+     * @param miso_pin  SPI MISO pin
+     * @param sclk_pin  SPI SCLK pin
+     * @param reset_pin SYNC/RESET pin (optional, pass -1 if not connected).
+     *                  Short pulse (<2048 t_CLKIN) = sync (clears FIFO, keeps registers).
+     *                  Long pulse (>2048 t_CLKIN) = full reset (clears FIFO + registers).
+     * @param spiBus    SPIClass pointer (default &SPI, the global Arduino SPI object).
+     *                  The board package auto-creates &SPI with the correct bus for each platform
+     *                  (VSPI on standard ESP32, FSPI on ESP32-S3, etc.).
+     *                  Pass &SPI1, &SPI2, etc. to use a different bus if needed.
      */
-    ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, SPIClass *spiBus = &SPI);
+    ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, int8_t reset_pin = -1, SPIClass *spiBus = &SPI);
     ~ADS131M08();
 
     /**
@@ -121,12 +124,28 @@ public:
      */
     float rawToVoltage(int32_t raw);
 
+    /**
+     * @brief Drains the 2-sample deep FIFO by reading 2 dummy frames.
+     *        Call after begin(), calibrate(), setGain(), setOSR(), or any read pause.
+     *        See datasheet Section 8.5.1.9.1 "Collecting Data After a Pause".
+     */
+    void drainFIFO();
+
+    /**
+     * @brief Strobes the SYNC/RESET pin to clear FIFO and resynchronize.
+     *        Performs a full hardware reset (>2048 t_CLKIN), which resets
+     *        all registers to defaults. Re-UNLOCKs automatically.
+     *        Requires reset_pin != -1, otherwise does nothing.
+     *        After this, reconfigure gain and OSR.
+     */
+    void syncReset();
+
     // --- Low-level Register Access ---
     bool writeRegister(uint8_t regAddr, uint16_t regData);
     bool readRegister(uint8_t regAddr, uint16_t &regData);
 
 private:
-    int8_t _pin_clk, _pin_cs, _pin_drdy, _pin_mosi, _pin_miso, _pin_sclk;
+    int8_t _pin_clk, _pin_cs, _pin_drdy, _pin_mosi, _pin_miso, _pin_sclk, _pin_reset;
     SPIClass *_spi; // Pointer to user-provided SPI bus (dependency injection)
     SPISettings _spiSettings;
     

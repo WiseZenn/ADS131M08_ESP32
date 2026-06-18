@@ -24,6 +24,8 @@ calibrate	KEYWORD2
 rawToVoltage	KEYWORD2
 writeRegister	KEYWORD2
 readRegister	KEYWORD2
+drainFIFO	KEYWORD2
+syncReset	KEYWORD2
 
 #######################################
 # Constants (LITERAL1)

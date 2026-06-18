@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-05-28
+
+### Added
+- **`drainFIFO()`** — Drains the 2-sample deep FIFO by reading 2 dummy frames. Called automatically after `begin()`, `calibrate()`, `setGain()`, and `setOSR()`. Also available as a public method for manual use after any read pause.
+- **`syncReset()`** — Strobes the optional SYNC/RESET pin to perform a full hardware reset (clears FIFO, resets filters, resets registers to defaults). Requires `reset_pin != -1`. Re-UNLOCKs automatically. After this, reconfigure gain and OSR.
+- **Constructor: `reset_pin` parameter** — New optional parameter `int8_t reset_pin = -1` for the SYNC/RESET pin. Placed before `spiBus` in the constructor signature.
+
+### Fixed
+- **FIFO stale data** — The ADS131M08 has a 2-sample deep FIFO. After `begin()`, `calibrate()`, `setGain()`, `setOSR()`, or any read pause, the FIFO accumulates stale samples. Without draining, `readData()` returns old values, and `calibrate()` produces incorrect offsets. Verified on hardware: DRDY toggles at half frequency when FIFO overflows (per datasheet Table 9-1).
+- **`calibrate()` offset corruption** — Previously did not drain FIFO before calibration, causing the first 1-2 samples (stale data) to corrupt the offset calculation.
+
+### Changed
+- **BREAKING: Constructor signature** — `reset_pin` inserted before `spiBus`. Old: `ADS131M08(clk, cs, drdy, mosi, miso, sclk, spiBus)`. New: `ADS131M08(clk, cs, drdy, mosi, miso, sclk, reset_pin, spiBus)`. Default `-1` means no reset pin. Update your code if you passed a custom `spiBus`.
+
 ## [2.1.0] - 2026-05-27
 
 ### Changed

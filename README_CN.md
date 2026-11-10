@@ -15,11 +15,13 @@
 - **可编程增益放大器 (PGA)**: 支持 1x/2x/4x/8x/16x/32x/64x/128x 增益配置，写入后自动回读验证。
 - **运行时 PGA 控制示例**: 可选 BLE 配置、NVS 掉电保存和事件驱动 Python 客户端；核心驱动不依赖 BLE 或 NVS。
 - **过采样率 (OSR)**: 128 至 16384 可配置，OSR 越高噪声越低、数据率越低。
-- **零点偏移校准**: 内置动态零电平校准功能。
+- **零点偏移校准**: 内置动态零电平校准功能，校准前自动排空 FIFO 防止陈旧数据污染。
 - **8通道同步采样**: 严格的 30 字节 SPI 数据帧，符合 TI 数据手册规范。
 - **24位高分辨率**: 完整 24 位数据解析，自动符号扩展为 32 位。
 - **跨平台 SPI**: 通过依赖注入使用 Arduino 全局 `SPI` 对象 — 兼容 ESP32/ESP32-S2/S3/C3 及其他 Arduino 平台。
 - **外部时钟支持**: 传入 `clk_pin = -1` 即可使用外部时钟源。
+- **自动 FIFO 管理**: `begin()`、`setGain()`、`setOSR()` 后和校准前自动调用 `drainFIFO()`。清空缓存后，仍需单独等待数字滤波器稳定。
+- **SYNC/RESET 引脚支持**: 可选 `reset_pin` 参数，通过 `syncReset()` 实现硬件级 FIFO 清除和重新同步。
 - **底层寄存器访问**: 提供 `writeRegister()` 和 `readRegister()` 进行完整硬件控制。
 
 ## 接线
@@ -36,6 +38,7 @@
 | **MISO (DOUT)**| GPIO 13 | SPI 数据输出 |
 | **CS** | GPIO 10 | 片选 |
 | **DRDY** | GPIO 9 | 数据就绪 |
+| **SYNC/RESET** | — | 同步/复位（可选，未连接传 `-1`） |
 
 *引脚在构造函数中完全可配置。*
 
@@ -48,15 +51,16 @@
 #include "ADS131M08.h"
 
 // 定义引脚
-#define PIN_CLK  1
-#define PIN_DRDY 9
+#define PIN_CLK   1
+#define PIN_DRDY  9
 #define PIN_CS   10
 #define PIN_MOSI 11
 #define PIN_SCLK 12
 #define PIN_MISO 13
+#define PIN_RESET -1  // SYNC/RESET 引脚（可选，未连接传 -1）
 
 // 默认使用全局 &SPI 对象（自动适配各 ESP32 变体）
-ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK);
+ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, PIN_RESET);
 ADS131M08_Data adcData;
 
 void setup() {
@@ -103,7 +107,7 @@ void loop() {
 
 ```cpp
 // clk_pin = -1：跳过 MCLK 生成，使用外部时钟
-ADS131M08 adc(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK);
+ADS131M08 adc(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, PIN_RESET);
 ```
 
 ### 自定义 SPI 总线
@@ -111,9 +115,43 @@ ADS131M08 adc(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK);
 默认 `spiBus` 参数为 `&SPI`，Arduino Core 会根据板型自动创建正确的全局 SPI 实例。如需使用其他 SPI 总线，可显式传入：
 
 ```cpp
-// 使用指定的 SPI 总线
+// 保留原有的自定义 SPI 调用方式：
 ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, &SPI1);
+// 也可以在 spiBus 前显式指定 reset_pin：
+ADS131M08 adcWithReset(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, -1, &SPI1);
 ```
+
+### SYNC/RESET 引脚（可选）
+
+如接线包含 SYNC/RESET 引脚，可使用硬件级 FIFO 清除和重新同步：
+
+```cpp
+#define PIN_RESET 4  // ADS131M08 SYNC/RESET 引脚
+
+ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, PIN_RESET);
+
+// 在代码中需要时，清除 FIFO 并重新同步：
+adc.syncReset();      // 清除 FIFO，然后重新 UNLOCK 寄存器
+adc.setGain(...);     // syncReset 后重新配置增益
+adc.setOSR(...);      // syncReset 后重新配置 OSR
+```
+
+`syncReset()` 使用 300 us 的复位脉冲，因此 CLKIN 需要至少 6.83 MHz
+（默认 8 MHz 时钟和外部 8.192 MHz 时钟均满足）。复位回读成功后，缓存增益恢复为 1X，软件零偏清零。
+
+### FIFO 管理
+
+ADS131M08 每通道有 2 级 FIFO。库会在 `begin()`、`setGain()`、`setOSR()` 后和 `calibrate()` 前排空缓存。
+暂停读取后也可以手动调用：
+
+```cpp
+// 暂停读取后排空 FIFO：
+adc.drainFIFO();  // 读取 2 帧虚拟数据，清除陈旧数据
+// 等待 DRDY 后，再读取下一个采样。
+```
+
+排空操作连续发送两个 NULL 帧，不等待 DRDY。它只清除缓存；修改增益或 OSR 后，
+仍须等待数字滤波器稳定再接受采样，完整处理见 BLE 示例。
 
 ### 运行时增益控制
 

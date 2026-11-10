@@ -15,11 +15,13 @@ High-performance Arduino library for the **Texas Instruments ADS131M08** (8-Chan
 - **Programmable Gain Amplifier (PGA)**: 1x, 2x, 4x, 8x, 16x, 32x, 64x, and 128x gain configurations with automatic readback verification.
 - **Runtime PGA Control Example**: Optional BLE gain control, NVS persistence, and an event-driven Python client; the core driver has no BLE or NVS dependencies.
 - **Oversampling Ratio (OSR)**: Configurable from 128 to 16384. Higher OSR = lower noise, lower data rate.
-- **Zero Offset Calibration**: Built-in function to dynamically calibrate output at 0V.
+- **Zero Offset Calibration**: Built-in function to dynamically calibrate output at 0V. FIFO is automatically drained before calibration to prevent stale sample contamination.
 - **8-Channel Simultaneous Sampling**: Strict 30-byte SPI frame structure per TI datasheet.
 - **24-bit High Resolution**: Full 24-bit data parsing with sign-extension to 32-bit.
 - **Cross-Platform SPI**: Uses Arduino's global `SPI` object via dependency injection — works on ESP32, ESP32-S2, ESP32-S3, ESP32-C3, and other Arduino platforms.
 - **External Clock Support**: Pass `clk_pin = -1` to use an external clock source instead of LEDC-generated MCLK.
+- **Automatic FIFO Management**: `drainFIFO()` runs after `begin()`, `setGain()`, and `setOSR()`, and before calibration. Clearing buffered data does not replace digital-filter settling.
+- **SYNC/RESET Pin Support**: Optional `reset_pin` parameter for hardware FIFO clear and resynchronization via `syncReset()`.
 - **Low-level Register Access**: `writeRegister()` and `readRegister()` for full hardware control.
 
 ## Wiring
@@ -36,6 +38,7 @@ High-performance Arduino library for the **Texas Instruments ADS131M08** (8-Chan
 | **MISO (DOUT)**| GPIO 13 | SPI Data Out |
 | **CS** | GPIO 10 | Chip Select |
 | **DRDY** | GPIO 9 | Data Ready |
+| **SYNC/RESET** | — | Sync/Reset (optional, use `-1` if not connected) |
 
 *Pins are fully configurable in the constructor.*
 
@@ -48,15 +51,16 @@ High-performance Arduino library for the **Texas Instruments ADS131M08** (8-Chan
 #include "ADS131M08.h"
 
 // Define your pins
-#define PIN_CLK  1
-#define PIN_DRDY 9
+#define PIN_CLK   1
+#define PIN_DRDY  9
 #define PIN_CS   10
 #define PIN_MOSI 11
 #define PIN_SCLK 12
 #define PIN_MISO 13
+#define PIN_RESET -1  // SYNC/RESET pin (optional, -1 = not connected)
 
 // Uses the default global &SPI object (auto-correct for each ESP32 variant)
-ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK);
+ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, PIN_RESET);
 ADS131M08_Data adcData;
 
 void setup() {
@@ -103,7 +107,7 @@ If your board has an external clock source (e.g., 8.192 MHz crystal), pass `clk_
 
 ```cpp
 // clk_pin = -1: skip MCLK generation, use external clock
-ADS131M08 adc(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK);
+ADS131M08 adc(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, PIN_RESET);
 ```
 
 ### Custom SPI Bus
@@ -111,9 +115,46 @@ ADS131M08 adc(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK);
 The default `spiBus` parameter is `&SPI`, which the Arduino core auto-creates for each board. To use a different SPI bus, pass it explicitly:
 
 ```cpp
-// Use a specific SPI bus
+// Existing custom-SPI calls remain valid:
 ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, &SPI1);
+// Or supply an explicit reset pin before spiBus:
+ADS131M08 adcWithReset(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, -1, &SPI1);
 ```
+
+### SYNC/RESET Pin (Optional)
+
+If your wiring includes a SYNC/RESET pin, you can use hardware-based FIFO clearing and synchronization:
+
+```cpp
+#define PIN_RESET 4  // ADS131M08 SYNC/RESET pin
+
+ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, PIN_RESET);
+
+// Later in your code, to clear the FIFO and resync:
+adc.syncReset();      // Clears FIFO, then re-UNLOCKs registers
+adc.setGain(...);     // Reconfigure gain after syncReset
+adc.setOSR(...);      // Reconfigure OSR after syncReset
+```
+
+`syncReset()` uses a 300 us reset pulse and therefore requires CLKIN >= 6.83 MHz
+(the default 8 MHz clock and an external 8.192 MHz clock meet this requirement).
+Successful reset readback restores cached 1X gain and clears software offsets.
+
+### FIFO Management
+
+The ADS131M08 has a two-entry FIFO per channel. The library clears it after
+`begin()`, `setGain()`, and `setOSR()`, and before `calibrate()`. Clear it manually
+after a pause in reading:
+
+```cpp
+// After a long pause in reading:
+adc.drainFIFO();  // Read 2 dummy frames to clear stale data
+// Wait for DRDY before reading the next sample.
+```
+
+The two NULL frames are sent consecutively without waiting for DRDY. This only
+clears buffered samples; after reconfiguration, also respect the filter settling
+time before accepting data. See the BLE example for that complete sequence.
 
 ### Runtime Gain Control
 

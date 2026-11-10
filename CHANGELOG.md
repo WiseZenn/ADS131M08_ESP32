@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - `currentGain() const` exposes the last successfully verified PGA gain without additional SPI traffic.
+- `drainFIFO()` clears the two-entry ADC FIFO after initialization/configuration and before calibration. Two consecutive NULL frames clear buffered data without waiting for another DRDY edge.
+- Optional SYNC/RESET pin support via a constructor overload and `syncReset()`. Existing seven-argument custom-SPI calls remain valid; GPIO 0 is unambiguous.
 - Optional `BLEGainControl` example: 36-byte raw data, 8-byte readable/notifiable gain configuration, one-byte gain commands, and NVS persistence only when the saved gain changes.
 - Event-driven Python client that serializes changes, disables data notifications before writes, invalidates queued callbacks, and resumes only after a verified, settled completion. Reports control latency and the sample gap across each transition.
 - Native regression tests for the real driver and BLE sketch, asynchronous host tests, and ESP32/ESP32-S3 example compilation in CI.
@@ -14,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - Reject invalid PGA enum values before touching SPI.
 - Clear gain-dependent software zero offsets after a successful change to a different gain; preserve offsets when reapplying the same gain.
 - Restore cached 1X scaling and clear old offsets after a successful ADC reinitialization.
+- Preserve the FIFO/SYNC fixes from PR #3 while keeping FIFO clearing separate from digital-filter settling. A verified hardware reset also restores cached 1X scaling and clears offsets.
 
 ### Compatibility
 - Existing constructor and sampling APIs remain unchanged. BLE and NVS dependencies are confined to the optional example; `BasicRead` remains available.

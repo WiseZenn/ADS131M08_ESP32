@@ -8,6 +8,7 @@ inline int testDrdy = LOW;
 inline int testClockStarts = 0;
 inline uint32_t testMicros = 0;
 inline bool testAutoClearDrdy = false;
+inline void (*testPinWrite)(int, int) = nullptr;
 using String = std::string;
 struct TestSerial {
     void begin(int) {}
@@ -18,7 +19,7 @@ inline TestSerial Serial;
 inline uint32_t micros() { return testMicros; }
 inline uint32_t millis() { return testMicros / 1000; }
 inline void pinMode(int, int) {}
-inline void digitalWrite(int, int) {}
+inline void digitalWrite(int pin, int level) { if (testPinWrite) testPinWrite(pin, level); }
 inline int digitalRead(int) { return testDrdy; }
 inline void delay(unsigned long ms) { testMicros += ms * 1000; }
 inline void delayMicroseconds(unsigned int) {}

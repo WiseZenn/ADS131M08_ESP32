@@ -6,8 +6,12 @@
 #include "ADS131M08.h"
 
 ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, SPIClass *spiBus)
+    : ADS131M08(clk_pin, cs_pin, drdy_pin, mosi_pin, miso_pin, sclk_pin, -1, spiBus) {}
+
+ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, int reset_pin, SPIClass *spiBus)
     : _pin_clk(clk_pin), _pin_cs(cs_pin), _pin_drdy(drdy_pin),
       _pin_mosi(mosi_pin), _pin_miso(miso_pin), _pin_sclk(sclk_pin),
+      _pin_reset(static_cast<int8_t>(reset_pin)),
       _spi(spiBus),
       _spiSettings(16000000, MSBFIRST, SPI_MODE1), // 16 MHz, SPI mode 1; max 25 MHz at DVDD 2.7-3.6V
       _currentGain(ADS131_GAIN_1X) {
@@ -38,6 +42,10 @@ bool ADS131M08::begin() {
     pinMode(_pin_cs, OUTPUT);
     digitalWrite(_pin_cs, HIGH);
     pinMode(_pin_drdy, INPUT); // Do NOT use pull-up, DRDY is actively driven by default
+    if (_pin_reset >= 0) {
+        pinMode(_pin_reset, OUTPUT);
+        digitalWrite(_pin_reset, HIGH); // Idle high (active low)
+    }
 
     // 3. Initialize SPI with user-provided pins
     _spi->begin(_pin_sclk, _pin_miso, _pin_mosi, _pin_cs);
@@ -76,6 +84,8 @@ bool ADS131M08::begin() {
     }
     _currentGain = ADS131_GAIN_1X;
     memset(_offsets, 0, sizeof(_offsets));
+    // 6. Drain FIFO — ADC has been converting during steps 4-5, 2 stale samples accumulated
+    drainFIFO();
 
     return true;
 }
@@ -159,6 +169,8 @@ bool ADS131M08::setGain(ADS131_Gain_t gain) {
                 memset(_offsets, 0, sizeof(_offsets));
             }
             _currentGain = gain;
+            // Clear buffered samples; the caller still handles filter settling.
+            drainFIFO();
             return true;
         }
     }
@@ -170,10 +182,14 @@ bool ADS131M08::setOSR(ADS131_OSR_t osr) {
     if (!readRegister(ADS131_REG_CLOCK, clockReg)) return false;
 
     // Clear OSR bits [4:2] and set new OSR
-    clockReg &= ~(0b111 << 2); 
+    clockReg &= ~(0b111 << 2);
     clockReg |= (osr << 2);
 
-    return writeRegister(ADS131_REG_CLOCK, clockReg);
+    if (!writeRegister(ADS131_REG_CLOCK, clockReg)) return false;
+
+    // Clear buffered samples; the caller still handles filter settling.
+    drainFIFO();
+    return true;
 }
 
 bool ADS131M08::isDataReady() {
@@ -211,6 +227,9 @@ void ADS131M08::calibrate(uint16_t samples) {
     long sums[ADS131_NUM_CHANNELS] = {0};
     memset(_offsets, 0, sizeof(_offsets));
 
+    // Drain stale samples before calibration
+    drainFIFO();
+
     for (uint16_t k = 0; k < samples; k++) {
         // Use yield() instead of delay(1) to prevent RTOS watchdog trigger 
         // and to avoid missing fast DRDY pulses.
@@ -242,4 +261,46 @@ float ADS131M08::rawToVoltage(int32_t raw) {
         case ADS131_GAIN_128X: gainMultiplier = 128.0f; break;
     }
     return ((float)raw / ADS131_RESOLUTION) * (ADS131_V_REF / gainMultiplier);
+}
+
+void ADS131M08::drainFIFO() {
+    // TI section 8.5.1.9.1 requires two consecutive reads. Do not wait for
+    // another DRDY edge: its pulse between buffered frames can be very narrow.
+    // Empty-FIFO output is discarded, and this does not wait for filter settling.
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    _transferFrame();
+    _transferFrame();
+}
+
+void ADS131M08::syncReset() {
+    if (_pin_reset < 0) return;
+
+    // Full hardware reset: hold low > 2048 t_CLKIN (at 8.192 MHz → > 250 us)
+    // This clears FIFO, resets digital filters, AND resets all registers to defaults.
+    // After reset, we must re-UNLOCK before any register writes.
+    digitalWrite(_pin_reset, LOW);
+    delayMicroseconds(300); // >2048 t_CLKIN at 8.192 MHz = 250us
+    digitalWrite(_pin_reset, HIGH);
+
+    // Allow reset recovery before accessing registers, as in begin().
+    delay(50);
+
+    // Re-send UNLOCK command (reset/sync requires re-unlocking)
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    _txBuf[0] = 0x06;
+    _txBuf[1] = 0x55;
+    _transferFrame();
+    delayMicroseconds(50);
+
+    // Publish reset scaling only after the reset defaults are verified.
+    uint16_t id = 0, gain1 = 0, gain2 = 0;
+    if (!readRegister(ADS131_REG_ID, id) || (id >> 12) != 0x02 ||
+        !readRegister(ADS131_REG_GAIN1, gain1) ||
+        !readRegister(ADS131_REG_GAIN2, gain2) || gain1 != 0 || gain2 != 0) {
+        return;
+    }
+    _currentGain = ADS131_GAIN_1X;
+    memset(_offsets, 0, sizeof(_offsets));
+
+    drainFIFO();
 }

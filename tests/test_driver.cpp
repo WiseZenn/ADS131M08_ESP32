@@ -7,6 +7,22 @@ static bool near(float actual, float expected) {
     return std::fabs(actual - expected) < 1e-6f;
 }
 
+static SPIClass *resetBus = nullptr;
+static bool resetLow = false;
+static int resetPulses = 0;
+
+static void emulateResetPin(int pin, int level) {
+    if (pin != 4) return;
+    if (level == LOW) resetLow = true;
+    else if (resetLow) {
+        resetLow = false;
+        ++resetPulses;
+        resetBus->registers.fill(0);
+        resetBus->registers[0] = 0x2800;
+        resetBus->response = 0;
+    }
+}
+
 int main() {
     SPIClass bus;
     ADS131M08 adc(-1, 10, 9, 11, 13, 12, &bus);
@@ -64,5 +80,38 @@ int main() {
     for (int i = 0; i < ADS131_NUM_CHANNELS; ++i) assert(data.ch[i] == bus.channels[i]);
     testDrdy = HIGH;
     assert(!adc.readData(data));
+
+    // Clear both FIFO entries even when DRDY deasserts after the first frame.
+    testAutoClearDrdy = true;
+    const int beforeDrain = bus.transfers;
+    const uint32_t beforeDrainTime = micros();
+    adc.drainFIFO();
+    assert(bus.transfers == beforeDrain + 2 && micros() == beforeDrainTime);
+    testAutoClearDrdy = false;
+
+    // No reset pin means no GPIO/SPI work and no change to verified gain.
+    testDrdy = LOW;
+    assert(adc.setGain(ADS131_GAIN_8X));
+    const int beforeReset = bus.transfers;
+    adc.syncReset();
+    assert(bus.transfers == beforeReset && adc.currentGain() == ADS131_GAIN_8X);
+
+    // New reset-pin forms coexist with the unchanged custom-SPI constructor.
+    ADS131M08 gpioZero(-1, 10, 9, 11, 13, 12, 0);
+    ADS131M08 explicitBus(-1, 10, 9, 11, 13, 12, -1, &bus);
+    const int beforeExplicitBegin = bus.begins;
+    assert(explicitBus.begin() && bus.begins == beforeExplicitBegin + 1);
+    ADS131M08 withReset(-1, 10, 9, 11, 13, 12, 4, &bus);
+    resetBus = &bus;
+    testPinWrite = emulateResetPin;
+    assert(withReset.begin());
+    assert(withReset.setGain(ADS131_GAIN_32X));
+    withReset.calibrate(3);
+    assert(withReset.readData(data) && data.ch[0] == 0);
+    withReset.syncReset();
+    assert(resetPulses == 1 && withReset.currentGain() == ADS131_GAIN_1X);
+    assert(near(withReset.rawToVoltage(4194304), 0.6f));
+    assert(withReset.readData(data) && data.ch[0] == bus.channels[0]);
+    testPinWrite = nullptr;
     std::cout << "Driver gain, readback, calibration, and frame tests passed\n";
 }

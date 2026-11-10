@@ -13,15 +13,16 @@
 #include "ADS131M08.h"
 
 // Define your pins
-#define PIN_CLK  1   // Set to -1 if using external clock
-#define PIN_DRDY 9
+#define PIN_CLK   1   // Set to -1 if using external clock
+#define PIN_DRDY  9
 #define PIN_CS   10
 #define PIN_MOSI 11
 #define PIN_SCLK 12
 #define PIN_MISO 13
+#define PIN_RESET -1  // SYNC/RESET pin (optional, -1 = not connected)
 
 // Uses default global &SPI — auto-correct for all ESP32 variants
-ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK);
+ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, PIN_RESET);
 ADS131M08_Data adcData;
 
 void setup() {

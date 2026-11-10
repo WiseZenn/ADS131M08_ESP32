@@ -5,12 +5,16 @@
 
 #include "ADS131M08.h"
 
-ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, int8_t reset_pin, SPIClass *spiBus)
+ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, SPIClass *spiBus)
+    : ADS131M08(clk_pin, cs_pin, drdy_pin, mosi_pin, miso_pin, sclk_pin, -1, spiBus) {}
+
+ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, int reset_pin, SPIClass *spiBus)
     : _pin_clk(clk_pin), _pin_cs(cs_pin), _pin_drdy(drdy_pin),
       _pin_mosi(mosi_pin), _pin_miso(miso_pin), _pin_sclk(sclk_pin),
-      _pin_reset(reset_pin),
-      _spi(spiBus), _currentGain(ADS131_GAIN_1X),
-      _spiSettings(16000000, MSBFIRST, SPI_MODE1) { // Mode 1 is mandatory; 16 MHz SPI (max 25 MHz per datasheet t_C(SC)=40ns @ DVDD 2.7-3.6V)
+      _pin_reset(static_cast<int8_t>(reset_pin)),
+      _spi(spiBus),
+      _spiSettings(16000000, MSBFIRST, SPI_MODE1), // 16 MHz, SPI mode 1; max 25 MHz at DVDD 2.7-3.6V
+      _currentGain(ADS131_GAIN_1X) {
     memset(_offsets, 0, sizeof(_offsets));
 }
 
@@ -72,6 +76,14 @@ bool ADS131M08::begin() {
         return false;
     }
 
+    // Verify RESET restored 1X before publishing the cached reset scale.
+    uint16_t gain1 = 0, gain2 = 0;
+    if (!readRegister(ADS131_REG_GAIN1, gain1) ||
+        !readRegister(ADS131_REG_GAIN2, gain2) || gain1 != 0 || gain2 != 0) {
+        return false;
+    }
+    _currentGain = ADS131_GAIN_1X;
+    memset(_offsets, 0, sizeof(_offsets));
     // 6. Drain FIFO — ADC has been converting during steps 4-5, 2 stale samples accumulated
     drainFIFO();
 
@@ -138,6 +150,8 @@ bool ADS131M08::readRegister(uint8_t regAddr, uint16_t &regData) {
 }
 
 bool ADS131M08::setGain(ADS131_Gain_t gain) {
+    if (static_cast<uint32_t>(gain) > ADS131_GAIN_128X) return false;
+
     uint16_t g = (uint16_t)gain;
     uint16_t regData = (g << 12) | (g << 8) | (g << 4) | g;
 
@@ -150,8 +164,12 @@ bool ADS131M08::setGain(ADS131_Gain_t gain) {
     if (readRegister(ADS131_REG_GAIN1, rb1) &&
         readRegister(ADS131_REG_GAIN2, rb2)) {
         if (rb1 == regData && rb2 == regData) {
+            if (gain != _currentGain) {
+                // Offsets are raw codes measured at the previous gain.
+                memset(_offsets, 0, sizeof(_offsets));
+            }
             _currentGain = gain;
-            // Gain change resets digital filter — discard unsettled samples
+            // Clear buffered samples; the caller still handles filter settling.
             drainFIFO();
             return true;
         }
@@ -169,7 +187,7 @@ bool ADS131M08::setOSR(ADS131_OSR_t osr) {
 
     if (!writeRegister(ADS131_REG_CLOCK, clockReg)) return false;
 
-    // OSR change resets digital filter — discard unsettled samples
+    // Clear buffered samples; the caller still handles filter settling.
     drainFIFO();
     return true;
 }
@@ -246,18 +264,12 @@ float ADS131M08::rawToVoltage(int32_t raw) {
 }
 
 void ADS131M08::drainFIFO() {
-    // Datasheet Section 8.5.1.9.1: "quickly read two data packets when data are
-    // read for the first time or after a gap in reading data."
-    ADS131M08_Data dummy;
-    for (int i = 0; i < 2; i++) {
-        // Wait for DRDY, but don't block forever
-        unsigned long t0 = millis();
-        while (!isDataReady()) {
-            if (millis() - t0 > 100) return; // timeout safety
-            yield();
-        }
-        readData(dummy);
-    }
+    // TI section 8.5.1.9.1 requires two consecutive reads. Do not wait for
+    // another DRDY edge: its pulse between buffered frames can be very narrow.
+    // Empty-FIFO output is discarded, and this does not wait for filter settling.
+    memset(_txBuf, 0, ADS131_FRAME_BYTES);
+    _transferFrame();
+    _transferFrame();
 }
 
 void ADS131M08::syncReset() {
@@ -270,8 +282,8 @@ void ADS131M08::syncReset() {
     delayMicroseconds(300); // >2048 t_CLKIN at 8.192 MHz = 250us
     digitalWrite(_pin_reset, HIGH);
 
-    // Wait for device to be ready (t_REGACQ = 5us after DRDY rising edge)
-    delayMicroseconds(10);
+    // Allow reset recovery before accessing registers, as in begin().
+    delay(50);
 
     // Re-send UNLOCK command (reset/sync requires re-unlocking)
     memset(_txBuf, 0, ADS131_FRAME_BYTES);
@@ -280,6 +292,15 @@ void ADS131M08::syncReset() {
     _transferFrame();
     delayMicroseconds(50);
 
-    // Drain FIFO — first 2 samples after sync use fast-settling filter
+    // Publish reset scaling only after the reset defaults are verified.
+    uint16_t id = 0, gain1 = 0, gain2 = 0;
+    if (!readRegister(ADS131_REG_ID, id) || (id >> 12) != 0x02 ||
+        !readRegister(ADS131_REG_GAIN1, gain1) ||
+        !readRegister(ADS131_REG_GAIN2, gain2) || gain1 != 0 || gain2 != 0) {
+        return;
+    }
+    _currentGain = ADS131_GAIN_1X;
+    memset(_offsets, 0, sizeof(_offsets));
+
     drainFIFO();
 }

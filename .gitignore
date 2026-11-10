@@ -22,6 +22,10 @@ Thumbs.db
 *.o
 *.obj
 
+# Python example and test caches
+__pycache__/
+.ruff_cache/
+
 # Datasheet & binary extras
 extras/ads131m08
 

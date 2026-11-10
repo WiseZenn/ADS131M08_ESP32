@@ -13,13 +13,14 @@
 ## 特性
 
 - **可编程增益放大器 (PGA)**: 支持 1x/2x/4x/8x/16x/32x/64x/128x 增益配置，写入后自动回读验证。
+- **运行时 PGA 控制示例**: 可选 BLE 配置、NVS 掉电保存和事件驱动 Python 客户端；核心驱动不依赖 BLE 或 NVS。
 - **过采样率 (OSR)**: 128 至 16384 可配置，OSR 越高噪声越低、数据率越低。
 - **零点偏移校准**: 内置动态零电平校准功能，校准前自动排空 FIFO 防止陈旧数据污染。
 - **8通道同步采样**: 严格的 30 字节 SPI 数据帧，符合 TI 数据手册规范。
 - **24位高分辨率**: 完整 24 位数据解析，自动符号扩展为 32 位。
 - **跨平台 SPI**: 通过依赖注入使用 Arduino 全局 `SPI` 对象 — 兼容 ESP32/ESP32-S2/S3/C3 及其他 Arduino 平台。
 - **外部时钟支持**: 传入 `clk_pin = -1` 即可使用外部时钟源。
-- **自动 FIFO 管理**: `begin()`、`calibrate()`、`setGain()`、`setOSR()` 后自动调用 `drainFIFO()`。ADS131M08 有 2 级 FIFO — 暂停读取后不排空会返回陈旧数据。
+- **自动 FIFO 管理**: `begin()`、`setGain()`、`setOSR()` 后和校准前自动调用 `drainFIFO()`。清空缓存后，仍需单独等待数字滤波器稳定。
 - **SYNC/RESET 引脚支持**: 可选 `reset_pin` 参数，通过 `syncReset()` 实现硬件级 FIFO 清除和重新同步。
 - **底层寄存器访问**: 提供 `writeRegister()` 和 `readRegister()` 进行完整硬件控制。
 
@@ -114,8 +115,10 @@ ADS131M08 adc(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, PIN_RESET);
 默认 `spiBus` 参数为 `&SPI`，Arduino Core 会根据板型自动创建正确的全局 SPI 实例。如需使用其他 SPI 总线，可显式传入：
 
 ```cpp
-// 使用指定的 SPI 总线（reset_pin 在 spiBus 之前）
-ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, -1, &SPI1);
+// 保留原有的自定义 SPI 调用方式：
+ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, &SPI1);
+// 也可以在 spiBus 前显式指定 reset_pin：
+ADS131M08 adcWithReset(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, -1, &SPI1);
 ```
 
 ### SYNC/RESET 引脚（可选）
@@ -133,15 +136,42 @@ adc.setGain(...);     // syncReset 后重新配置增益
 adc.setOSR(...);      // syncReset 后重新配置 OSR
 ```
 
+`syncReset()` 使用 300 us 的复位脉冲，因此 CLKIN 需要至少 6.83 MHz
+（默认 8 MHz 时钟和外部 8.192 MHz 时钟均满足）。复位回读成功后，缓存增益恢复为 1X，软件零偏清零。
+
 ### FIFO 管理
 
-ADS131M08 每通道有 2 级 FIFO。暂停读取（或 `begin()`/`calibrate()`/`setGain()`/`setOSR()` 之后），FIFO 中可能有陈旧数据。库会在上述方法中自动调用 `drainFIFO()`。也可以手动调用：
+ADS131M08 每通道有 2 级 FIFO。库会在 `begin()`、`setGain()`、`setOSR()` 后和 `calibrate()` 前排空缓存。
+暂停读取后也可以手动调用：
 
 ```cpp
 // 暂停读取后排空 FIFO：
 adc.drainFIFO();  // 读取 2 帧虚拟数据，清除陈旧数据
-// 现在 readData() 返回实时数据
+// 等待 DRDY 后，再读取下一个采样。
 ```
+
+排空操作连续发送两个 NULL 帧，不等待 DRDY。它只清除缓存；修改增益或 OSR 后，
+仍须等待数字滤波器稳定再接受采样，完整处理见 BLE 示例。
+
+### 运行时增益控制
+
+`setGain()` 可在运行中调用，请与 ADC 采样放在同一个任务中执行。
+`currentGain()` 返回最近一次成功回读验证的增益，不产生额外 SPI 通信：
+
+```cpp
+if (adc.setGain(ADS131_GAIN_8X)) {
+    ADS131_Gain_t actual = adc.currentGain();
+    // 丢弃滤波器尚未稳定的数据，再使用新增益下的采样。
+}
+```
+
+成功切换到不同增益会清除软件零偏，需要时在新增益下重新校零；重复设置相同增益则保留零偏。
+设置失败可能已经部分改写硬件，必须成功恢复到已知增益后再使用数据。
+`currentGain()` 是缓存，不能代表失败后或直接调用 `writeRegister()` 后的真实硬件状态。
+
+[BLEGainControl 示例](examples/BLEGainControl/README.md) 包含完整的 BLE 配置、寄存器验证、
+数字滤波稳定处理和上位机握手，数据包保持 36 字节，并拒绝切换前排队的旧数据回调。
+固定增益应用仍可使用 `BasicRead`。
 
 ## 数据率参考
 
@@ -172,6 +202,19 @@ f_DATA = f_MOD / OSR
 每帧 SPI 数据为 10 字 × 24 位 = **240 个时钟周期**。在 16 MHz 下，一帧耗时 **15 μs**，在 32 kSPS（OSR=128）的 31.25 μs 窗口内绰绰有余。
 
 如果使用杜邦线或面包板，走线尽量短，避免高频信号完整性问题。
+
+## 开发验证
+
+Python 协议测试需要 Python 3.10+；原生驱动与固件测试需要 C++17 编译器（默认 `g++`）：
+
+```sh
+python -m unittest discover -s tests -v
+python tests/run_native.py
+```
+
+原生测试将实际驱动和 BLE 示例与模拟 SPI、GATT、NVS、时钟组合运行。
+CI 还会使用 Arduino-ESP32 3.3.11，分别为 ESP32 和 ESP32-S3 编译两个示例。
+实际硬件的切换耗时仍需实测。
 
 ## 更新日志
 

@@ -19,6 +19,7 @@ begin	KEYWORD2
 isDataReady	KEYWORD2
 readData	KEYWORD2
 setGain	KEYWORD2
+currentGain	KEYWORD2
 setOSR	KEYWORD2
 calibrate	KEYWORD2
 rawToVoltage	KEYWORD2

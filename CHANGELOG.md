@@ -2,19 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.2.0] - 2026-05-28
+## [2.2.0] - 2026-11-10
 
 ### Added
-- **`drainFIFO()`** — Drains the 2-sample deep FIFO by reading 2 dummy frames. Called automatically after `begin()`, `calibrate()`, `setGain()`, and `setOSR()`. Also available as a public method for manual use after any read pause.
-- **`syncReset()`** — Strobes the optional SYNC/RESET pin to perform a full hardware reset (clears FIFO, resets filters, resets registers to defaults). Requires `reset_pin != -1`. Re-UNLOCKs automatically. After this, reconfigure gain and OSR.
-- **Constructor: `reset_pin` parameter** — New optional parameter `int8_t reset_pin = -1` for the SYNC/RESET pin. Placed before `spiBus` in the constructor signature.
+- `currentGain() const` exposes the last successfully verified PGA gain without additional SPI traffic.
+- `drainFIFO()` clears the two-entry ADC FIFO after initialization/configuration and before calibration. Two consecutive NULL frames clear buffered data without waiting for another DRDY edge.
+- Optional SYNC/RESET pin support via a constructor overload and `syncReset()`. Existing seven-argument custom-SPI calls remain valid; GPIO 0 is unambiguous.
+- Optional `BLEGainControl` example: 36-byte raw data, 8-byte readable/notifiable gain configuration, one-byte gain commands, and NVS persistence only when the saved gain changes.
+- Event-driven Python client that serializes changes, disables data notifications before writes, invalidates queued callbacks, and resumes only after a verified, settled completion. Reports control latency and the sample gap across each transition.
+- Native regression tests for the real driver and BLE sketch, asynchronous host tests, and ESP32/ESP32-S3 example compilation in CI.
 
 ### Fixed
-- **FIFO stale data** — The ADS131M08 has a 2-sample deep FIFO. After `begin()`, `calibrate()`, `setGain()`, `setOSR()`, or any read pause, the FIFO accumulates stale samples. Without draining, `readData()` returns old values, and `calibrate()` produces incorrect offsets. Verified on hardware: DRDY toggles at half frequency when FIFO overflows (per datasheet Table 9-1).
-- **`calibrate()` offset corruption** — Previously did not drain FIFO before calibration, causing the first 1-2 samples (stale data) to corrupt the offset calculation.
+- Reject invalid PGA enum values before touching SPI.
+- Clear gain-dependent software zero offsets after a successful change to a different gain; preserve offsets when reapplying the same gain.
+- Restore cached 1X scaling and clear old offsets after a successful ADC reinitialization.
+- Preserve the FIFO/SYNC fixes from PR #3 while keeping FIFO clearing separate from digital-filter settling. A verified hardware reset also restores cached 1X scaling and clears offsets.
 
-### Changed
-- **BREAKING: Constructor signature** — `reset_pin` inserted before `spiBus`. Old: `ADS131M08(clk, cs, drdy, mosi, miso, sclk, spiBus)`. New: `ADS131M08(clk, cs, drdy, mosi, miso, sclk, reset_pin, spiBus)`. Default `-1` means no reset pin. Update your code if you passed a custom `spiBus`.
+### Compatibility
+- Existing constructor and sampling APIs remain unchanged. BLE and NVS dependencies are confined to the optional example; `BasicRead` remains available.
+- The BLE example uses the existing RH56 UUIDs and packet sizes. Previously reserved config bytes now identify settled-acknowledgment protocol version 1 and NVS save status. Legacy hosts ignore these bytes but must adopt the documented handshake for correct voltage scaling during live changes.
+- The new client rejects legacy firmware without settled acknowledgments. A failed/cancelled/timed-out transaction requires reconnecting before another host transaction, so late replies cannot be mistaken for a new result.
 
 ## [2.1.0] - 2026-05-27
 

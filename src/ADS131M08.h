@@ -1,7 +1,7 @@
 /**
  * @file ADS131M08.h
  * @brief Professional Arduino/ESP32 library for the Texas Instruments ADS131M08 8-Channel 24-bit ADC.
- * @version 1.0.0
+ * @version 2.2.0
  * @author WiseZenn (Modified & Optimized)
  * @license MIT
  * 
@@ -31,7 +31,9 @@
 /**
  * @brief Programmable Gain Amplifier (PGA) options.
  */
-typedef enum {
+// A fixed underlying type makes invalid integer codes well-defined to inspect
+// and reject, including when callers enable undefined-behavior sanitizers.
+typedef enum : int32_t {
     ADS131_GAIN_1X   = 0,
     ADS131_GAIN_2X   = 1,
     ADS131_GAIN_4X   = 2,
@@ -74,15 +76,21 @@ public:
      * @param mosi_pin  SPI MOSI pin
      * @param miso_pin  SPI MISO pin
      * @param sclk_pin  SPI SCLK pin
-     * @param reset_pin SYNC/RESET pin (optional, pass -1 if not connected).
-     *                  Short pulse (<2048 t_CLKIN) = sync (clears FIFO, keeps registers).
-     *                  Long pulse (>2048 t_CLKIN) = full reset (clears FIFO + registers).
      * @param spiBus    SPIClass pointer (default &SPI, the global Arduino SPI object).
      *                  The board package auto-creates &SPI with the correct bus for each platform
      *                  (VSPI on standard ESP32, FSPI on ESP32-S3, etc.).
      *                  Pass &SPI1, &SPI2, etc. to use a different bus if needed.
      */
-    ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, int8_t reset_pin = -1, SPIClass *spiBus = &SPI);
+    ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, SPIClass *spiBus = &SPI);
+
+    /**
+     * @brief Constructor with an explicit SYNC/RESET pin before spiBus.
+     * @param reset_pin SYNC/RESET pin, or -1 if not connected.
+     * @param spiBus User-provided SPI bus (default &SPI).
+     * @note The original seven-argument custom-SPI constructor remains valid.
+     *       int also accepts GPIO 0 without ambiguity with a null pointer.
+     */
+    ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, int reset_pin, SPIClass *spiBus = &SPI);
     ~ADS131M08();
 
     /**
@@ -104,9 +112,25 @@ public:
     bool readData(ADS131M08_Data &data);
 
     /**
-     * @brief Sets PGA Gain for all channels.
+     * @brief Sets PGA gain for all channels and verifies both gain registers.
+     * @return false for an invalid gain or a readback mismatch. On failure,
+     *         the hardware may be partially updated; restore a known gain
+     *         successfully before using subsequent data or voltage conversions.
+     * @note A successful gain change clears software zero offsets. Recalibrate
+     *       at the new gain if needed. The caller must discard unsettled ADC
+     *       output after changing gain (datasheet section 8.3.7.1.2).
+     *       Serialize this call with all other ADC/SPI operations.
      */
     bool setGain(ADS131_Gain_t gain);
+
+    /**
+     * @brief Returns the last gain successfully verified by setGain().
+     * @note Defaults to 1X and returns to 1X after a successful begin() or
+     *       verified syncReset(). This cached value is not a hardware read
+     *       and is unchanged on failure.
+     *       Direct writes to gain registers bypass this cache.
+     */
+    ADS131_Gain_t currentGain() const { return _currentGain; }
 
     /**
      * @brief Sets Oversampling Ratio (OSR) to control output data rate.
@@ -125,8 +149,10 @@ public:
     float rawToVoltage(int32_t raw);
 
     /**
-     * @brief Drains the 2-sample deep FIFO by reading 2 dummy frames.
-     *        Call after begin(), calibrate(), setGain(), setOSR(), or any read pause.
+     * @brief Drains the 2-sample FIFO with two consecutive NULL frames.
+     *        Called after begin(), setGain(), setOSR(), and before calibrate().
+     *        Call manually after a read pause. This never waits for DRDY and
+     *        does not replace the filter-settling guard after reconfiguration.
      *        See datasheet Section 8.5.1.9.1 "Collecting Data After a Pause".
      */
     void drainFIFO();
@@ -137,6 +163,8 @@ public:
      *        all registers to defaults. Re-UNLOCKs automatically.
      *        Requires reset_pin != -1, otherwise does nothing.
      *        After this, reconfigure gain and OSR.
+     *        Successful readback restores cached 1X gain and clears offsets.
+     *        The 300 us pulse requires a CLKIN of at least 6.83 MHz.
      */
     void syncReset();
 

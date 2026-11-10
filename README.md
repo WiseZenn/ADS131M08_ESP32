@@ -2,7 +2,7 @@
 
 [![Arduino](https://img.shields.io/badge/Arduino-ESP32-blue.svg)](https://github.com/espressif/arduino-esp32)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.1.0-orange.svg)](library.properties)
+[![Version](https://img.shields.io/badge/version-2.2.0-orange.svg)](library.properties)
 
 [🇬🇧 English](README.md) | [🇨🇳 中文](README_CN.md)
 
@@ -13,6 +13,7 @@ High-performance Arduino library for the **Texas Instruments ADS131M08** (8-Chan
 ## Features
 
 - **Programmable Gain Amplifier (PGA)**: 1x, 2x, 4x, 8x, 16x, 32x, 64x, and 128x gain configurations with automatic readback verification.
+- **Runtime PGA Control Example**: Optional BLE gain control, NVS persistence, and an event-driven Python client; the core driver has no BLE or NVS dependencies.
 - **Oversampling Ratio (OSR)**: Configurable from 128 to 16384. Higher OSR = lower noise, lower data rate.
 - **Zero Offset Calibration**: Built-in function to dynamically calibrate output at 0V.
 - **8-Channel Simultaneous Sampling**: Strict 30-byte SPI frame structure per TI datasheet.
@@ -114,6 +115,29 @@ The default `spiBus` parameter is `&SPI`, which the Arduino core auto-creates fo
 ADS131M08 adc(PIN_CLK, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK, &SPI1);
 ```
 
+### Runtime Gain Control
+
+`setGain()` can be called at runtime from the same task that reads the ADC.
+`currentGain()` returns the last successfully verified gain, without SPI traffic:
+
+```cpp
+if (adc.setGain(ADS131_GAIN_8X)) {
+    ADS131_Gain_t actual = adc.currentGain();
+    // Discard unsettled output before using samples at the new gain.
+}
+```
+
+A successful gain change clears software zero offsets; recalibrate at the new
+gain if required. Reapplying the same gain preserves offsets. A failed write
+can leave the hardware partially updated, so successfully restore a known gain
+before using subsequent data. `currentGain()` is a cache, not proof of hardware
+state after a failure or direct `writeRegister()` calls.
+
+See [BLEGainControl](examples/BLEGainControl/README.md) for a complete BLE
+example with unchanged 36-byte data packets, verified configuration, ADC filter
+settling, and a host handshake that rejects queued samples from the old gain.
+`BasicRead` remains available for applications with a fixed gain.
+
 ## Data Rate Reference
 
 Formula (Datasheet Equation 5):
@@ -143,6 +167,20 @@ The default SPI clock is **16 MHz** (max 25 MHz per datasheet at 3.3V DVDD).
 Each SPI frame is 10 words × 24 bits = **240 clock cycles**. At 16 MHz, one frame takes **15 us**, well within the 31.25 us window of 32 kSPS (OSR=128).
 
 If using jumper wires or breadboard, keep wires short to avoid signal integrity issues at high SPI frequencies.
+
+## Development
+
+Run the host protocol tests with Python 3.10+ and the native driver/sketch tests
+with a C++17 compiler (`g++` by default):
+
+```sh
+python -m unittest discover -s tests -v
+python tests/run_native.py
+```
+
+The native tests compile the real driver and BLE sketch against fake SPI, GATT,
+NVS, and clock implementations. CI also compiles both examples for ESP32 and
+ESP32-S3 with Arduino-ESP32 3.3.11. Hardware timing must be measured on a board.
 
 ## Changelog
 

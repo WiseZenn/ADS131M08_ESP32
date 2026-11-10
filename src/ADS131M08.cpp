@@ -8,8 +8,9 @@
 ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, SPIClass *spiBus)
     : _pin_clk(clk_pin), _pin_cs(cs_pin), _pin_drdy(drdy_pin),
       _pin_mosi(mosi_pin), _pin_miso(miso_pin), _pin_sclk(sclk_pin),
-      _spi(spiBus), _currentGain(ADS131_GAIN_1X),
-      _spiSettings(16000000, MSBFIRST, SPI_MODE1) { // Mode 1 is mandatory; 16 MHz SPI (max 25 MHz per datasheet t_C(SC)=40ns @ DVDD 2.7-3.6V)
+      _spi(spiBus),
+      _spiSettings(16000000, MSBFIRST, SPI_MODE1), // 16 MHz, SPI mode 1; max 25 MHz at DVDD 2.7-3.6V
+      _currentGain(ADS131_GAIN_1X) {
     memset(_offsets, 0, sizeof(_offsets));
 }
 
@@ -66,6 +67,15 @@ bool ADS131M08::begin() {
     if ((idReg >> 12) != 0x02) {
         return false;
     }
+
+    // Verify RESET restored 1X before publishing the cached reset scale.
+    uint16_t gain1 = 0, gain2 = 0;
+    if (!readRegister(ADS131_REG_GAIN1, gain1) ||
+        !readRegister(ADS131_REG_GAIN2, gain2) || gain1 != 0 || gain2 != 0) {
+        return false;
+    }
+    _currentGain = ADS131_GAIN_1X;
+    memset(_offsets, 0, sizeof(_offsets));
 
     return true;
 }
@@ -130,6 +140,8 @@ bool ADS131M08::readRegister(uint8_t regAddr, uint16_t &regData) {
 }
 
 bool ADS131M08::setGain(ADS131_Gain_t gain) {
+    if (static_cast<uint32_t>(gain) > ADS131_GAIN_128X) return false;
+
     uint16_t g = (uint16_t)gain;
     uint16_t regData = (g << 12) | (g << 8) | (g << 4) | g;
 
@@ -142,6 +154,10 @@ bool ADS131M08::setGain(ADS131_Gain_t gain) {
     if (readRegister(ADS131_REG_GAIN1, rb1) &&
         readRegister(ADS131_REG_GAIN2, rb2)) {
         if (rb1 == regData && rb2 == regData) {
+            if (gain != _currentGain) {
+                // Offsets are raw codes measured at the previous gain.
+                memset(_offsets, 0, sizeof(_offsets));
+            }
             _currentGain = gain;
             return true;
         }

@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-11-10
+
+### Added
+- `currentGain() const` exposes the last successfully verified PGA gain without additional SPI traffic.
+- Optional `BLEGainControl` example: 36-byte raw data, 8-byte readable/notifiable gain configuration, one-byte gain commands, and NVS persistence only when the saved gain changes.
+- Event-driven Python client that serializes changes, disables data notifications before writes, invalidates queued callbacks, and resumes only after a verified, settled completion. Reports control latency and the sample gap across each transition.
+- Native regression tests for the real driver and BLE sketch, asynchronous host tests, and ESP32/ESP32-S3 example compilation in CI.
+
+### Fixed
+- Reject invalid PGA enum values before touching SPI.
+- Clear gain-dependent software zero offsets after a successful change to a different gain; preserve offsets when reapplying the same gain.
+- Restore cached 1X scaling and clear old offsets after a successful ADC reinitialization.
+
+### Compatibility
+- Existing constructor and sampling APIs remain unchanged. BLE and NVS dependencies are confined to the optional example; `BasicRead` remains available.
+- The BLE example uses the existing RH56 UUIDs and packet sizes. Previously reserved config bytes now identify settled-acknowledgment protocol version 1 and NVS save status. Legacy hosts ignore these bytes but must adopt the documented handshake for correct voltage scaling during live changes.
+- The new client rejects legacy firmware without settled acknowledgments. A failed/cancelled/timed-out transaction requires reconnecting before another host transaction, so late replies cannot be mistaken for a new result.
+
 ## [2.1.0] - 2026-05-27
 
 ### Changed

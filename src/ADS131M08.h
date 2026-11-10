@@ -1,7 +1,7 @@
 /**
  * @file ADS131M08.h
  * @brief Professional Arduino/ESP32 library for the Texas Instruments ADS131M08 8-Channel 24-bit ADC.
- * @version 1.0.0
+ * @version 2.2.0
  * @author WiseZenn (Modified & Optimized)
  * @license MIT
  * 
@@ -31,7 +31,9 @@
 /**
  * @brief Programmable Gain Amplifier (PGA) options.
  */
-typedef enum {
+// A fixed underlying type makes invalid integer codes well-defined to inspect
+// and reject, including when callers enable undefined-behavior sanitizers.
+typedef enum : int32_t {
     ADS131_GAIN_1X   = 0,
     ADS131_GAIN_2X   = 1,
     ADS131_GAIN_4X   = 2,
@@ -101,9 +103,24 @@ public:
     bool readData(ADS131M08_Data &data);
 
     /**
-     * @brief Sets PGA Gain for all channels.
+     * @brief Sets PGA gain for all channels and verifies both gain registers.
+     * @return false for an invalid gain or a readback mismatch. On failure,
+     *         the hardware may be partially updated; restore a known gain
+     *         successfully before using subsequent data or voltage conversions.
+     * @note A successful gain change clears software zero offsets. Recalibrate
+     *       at the new gain if needed. The caller must discard unsettled ADC
+     *       output after changing gain (datasheet section 8.3.7.1.2).
+     *       Serialize this call with all other ADC/SPI operations.
      */
     bool setGain(ADS131_Gain_t gain);
+
+    /**
+     * @brief Returns the last gain successfully verified by setGain().
+     * @note Defaults to 1X and returns to 1X after a successful begin(). This
+     *       cached value is not a hardware read and is unchanged on failure.
+     *       Direct writes to gain registers bypass this cache.
+     */
+    ADS131_Gain_t currentGain() const { return _currentGain; }
 
     /**
      * @brief Sets Oversampling Ratio (OSR) to control output data rate.

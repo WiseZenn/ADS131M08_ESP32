@@ -1,0 +1,43 @@
+name: Checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.10'
+      - name: Host protocol regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Native driver and firmware regression tests
+        run: python tests/run_native.py --compiler-arg=-fsanitize=undefined --compiler-arg=-fno-sanitize-recover=all
+
+  arduino:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [esp32, esp32s3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02 # v2.0.0
+        with:
+          version: '1.5.1'
+      - name: Install pinned ESP32 core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.11 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      - name: Compile BasicRead
+        run: arduino-cli compile --fqbn esp32:esp32:${{ matrix.board }} --library . examples/BasicRead
+      - name: Compile BLEGainControl
+        run: arduino-cli compile --fqbn esp32:esp32:${{ matrix.board }} --library . examples/BLEGainControl

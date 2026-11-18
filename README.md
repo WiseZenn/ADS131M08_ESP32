@@ -2,7 +2,7 @@
 
 [![Arduino](https://img.shields.io/badge/Arduino-ESP32-blue.svg)](https://github.com/espressif/arduino-esp32)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.2.0-orange.svg)](library.properties)
+[![Version](https://img.shields.io/badge/version-3.0.0-orange.svg)](library.properties)
 
 [🇬🇧 English](README.md) | [🇨🇳 中文](README_CN.md)
 
@@ -148,7 +148,7 @@ after a pause in reading:
 
 ```cpp
 // After a long pause in reading:
-adc.drainFIFO();  // Read 2 dummy frames to clear stale data
+adc.drainFIFO();  // Read 2 dummy frames; returns false on a transport error
 // Wait for DRDY before reading the next sample.
 ```
 
@@ -205,7 +205,20 @@ At f_CLKIN = 8.192 MHz (f_MOD = 4.096 MHz):
 
 The default SPI clock is **16 MHz** (max 25 MHz per datasheet at 3.3V DVDD).
 
-Each SPI frame is 10 words × 24 bits = **240 clock cycles**. At 16 MHz, one frame takes **15 us**, well within the 31.25 us window of 32 kSPS (OSR=128).
+Each SPI frame is 10 words × 24 bits, or 240 clock cycles. At 16 MHz the transfer takes **15 µs** on the wire. Budget separately for driver and task scheduling.
+
+### DRDY-driven acquisition and DMA
+
+`begin()` uses the Arduino SPI bus. `beginDMA()` selects the ESP-IDF SPI DMA
+transport on an unused host and unused pins (SPI2 by default). Use one
+serialized owner for reads and register commands. The caller still waits for
+DRDY. Compare measured short-frame latency with both transports. See the
+[ESP-IDF SPI Master documentation](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/api-reference/peripherals/spi_master.html).
+
+The [BLEGainControl example](examples/BLEGainControl/README.md) wakes an
+acquisition task on DRDY and sends BLE in a separate task. It preserves the
+36-byte RH56 control format and adds batched recording with loss counters.
+Compile that example with `-DADS131_BLE_USE_DMA=1` to select DMA.
 
 If using jumper wires or breadboard, keep wires short to avoid signal integrity issues at high SPI frequencies.
 

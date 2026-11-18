@@ -3,6 +3,7 @@
 #include <cassert>
 #include <iostream>
 #include <limits>
+#include <new>
 
 static void finishTransition() {
     assert(phase == Phase::Settling);
@@ -93,5 +94,78 @@ int main() {
     server->callbacks->onDisconnect(server);
     loop();
     assert(!connected.load() && adc.currentGain() == ADS131_GAIN_2X);
-    std::cout << "Firmware settling, failure, persistence, queue, and timing tests passed\n";
+    // Every ADC sample survives the old 10 ms throttle in capture mode.
+    server->callbacks->onConnect(server);
+    setCaptureSubscribed(true);
+    const auto beforeCapture = sampleSequence;
+    for (int i = 1; i <= 5; ++i) {
+        testMicros += SAMPLE_PERIOD_US;
+        SPI.channels[0] = i;
+        testDrdy = LOW;
+        loop();
+    }
+    assert(pendingCount == 5 && captureCharacteristic->notifications == 0);
+
+    // Congestion must retain the batch, not overwrite its older samples.
+    captureCharacteristic->refuseNotify = true;
+    testMicros += SAMPLE_PERIOD_US;
+    SPI.channels[0] = 6;
+    testDrdy = LOW;
+    loop();
+    assert(pendingCount == 6 && notifyRetries == 1);
+    captureCharacteristic->refuseNotify = false;
+    for (int i = 7; i <= 11; ++i) {
+        testMicros += SAMPLE_PERIOD_US;
+        SPI.channels[0] = i;
+        testDrdy = LOW;
+        loop();
+    }
+    assert(captureCharacteristic->notifications == 1 && captureAccepted == 6);
+    assert(captureCharacteristic->value.size() == 240);
+    for (int i = 0; i < 6; ++i) {
+        CaptureSample sample;
+        memcpy(&sample, captureCharacteristic->value.data() + i * sizeof(sample), sizeof(sample));
+        assert(sample.sequence == beforeCapture + i + 1 && sample.ch[0] == i + 1);
+    }
+
+    // A smaller peer MTU reduces the batch size; no oversized notify.
+    server->mtu = 83;
+    serviceStream();
+    assert(captureCharacteristic->value.size() == 80);
+
+    // The FIFO is bounded and the number of newly dropped ADC records is visible.
+    for (size_t i = 0; i < CAPTURE_QUEUE_DEPTH + 5; ++i) {
+        testMicros += SAMPLE_PERIOD_US;
+        testDrdy = LOW;
+        serviceAdc();
+    }
+    assert(uxQueueMessagesWaiting(captureQueue) == CAPTURE_QUEUE_DEPTH);
+    assert(queueDrops.load() > 0);
+    configCharacteristic->write({4});
+    serviceAdc();
+    assert(uxQueueMessagesWaiting(captureQueue) == 0 && pendingCount == 0);
+    assert(!streamReady.load());
+    finishTransition();
+
+    const auto errorsBefore = readErrors.load();
+    const auto recoveriesBefore = fifoResyncs.load();
+    const auto lastReadBefore = lastReadUs;
+    adc.~ADS131M08();
+    new (&adc) ADS131M08(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK,
+                        static_cast<SPIClass *>(nullptr));
+    testMicros += 2 * SAMPLE_PERIOD_US;
+    testDrdy = LOW;
+    serviceAdc();
+    assert(readErrors.load() == errorsBefore + 1);
+    assert(fifoResyncs.load() == recoveriesBefore && lastReadUs == lastReadBefore);
+
+    adc.~ADS131M08();
+    new (&adc) ADS131M08(-1, PIN_CS, PIN_DRDY, PIN_MOSI, PIN_MISO, PIN_SCLK);
+    assert(adc.begin());
+    const int beforeRetry = SPI.transfers;
+    testDrdy = HIGH;
+    serviceAdc();
+    assert(SPI.transfers == beforeRetry + 2);
+    assert(fifoResyncs.load() == recoveriesBefore + 1 && lastReadUs == micros());
+    std::cout << "Firmware tests passed, including ordered ADC capture, retry, MTU and overflow\n";
 }

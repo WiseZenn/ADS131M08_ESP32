@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0] - 2026-11-18
+
+### Added
+- `beginDMA()` offers an optional ESP-IDF SPI transport for callers with a dedicated SPI host. `begin()` still uses Arduino SPI.
+- The `BLEGainControl` example wakes a dedicated acquisition task on DRDY and sends BLE notifications from a separate task. The live stream retains its 36-byte payload and defaults to up to 100 Hz.
+- A separate Capture characteristic sends batches of up to six ADC records, each with a sequence number and read timestamp. The Python client can record these to CSV.
+
+### Fixed
+- Retry a failed ADC FIFO drain before accepting new samples, and count only successful drains as recoveries.
+- Report a disconnect during recording as an error while preserving the partial CSV.
+- Use 64-bit calibration sums and retain the previous offsets if a sample transfer fails.
+
+### Compatibility
+- `ADS131M08` instances are non-copyable so the DMA transport has a single owner. Pass the instance by reference rather than copying it.
+- `drainFIFO()` returns `bool` to report whether both transfers succeeded. Existing direct calls that discard the result still compile; code using its exact member function type must update it.
+- The live Data and Config wire formats are unchanged. The Capture characteristic is opt-in and suspends the live stream while subscribed.
+
 ## [2.2.0] - 2026-11-10
 
 ### Added

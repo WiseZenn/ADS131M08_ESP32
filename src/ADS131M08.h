@@ -15,6 +15,10 @@
 #include <Arduino.h>
 #include <SPI.h>
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include <driver/spi_master.h>
+#endif
+
 #define ADS131_NUM_CHANNELS 8
 #define ADS131_FRAME_BYTES  30
 #define ADS131_V_REF        1.2f
@@ -92,12 +96,25 @@ public:
      */
     ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, int reset_pin, SPIClass *spiBus = &SPI);
     ~ADS131M08();
+    ADS131M08(const ADS131M08 &) = delete;
+    ADS131M08 &operator=(const ADS131M08 &) = delete;
 
     /**
      * @brief Initializes the clock, SPI bus, and resets the ADC.
      * @return true if successful, false otherwise.
      */
     bool begin();
+
+#if defined(ARDUINO_ARCH_ESP32)
+    /**
+     * @brief Start with ESP-IDF SPI DMA instead of Arduino SPIClass.
+     * @note Call before begin() and use an otherwise unused SPI host and pins.
+     *       All ADC operations still need one serialized task owner. Each
+     *       transaction blocks that task until completion, leaving the CPU
+     *       available to other tasks. This method does not wait for DRDY.
+     */
+    bool beginDMA(spi_host_device_t host = SPI2_HOST);
+#endif
 
     /**
      * @brief Checks if DRDY pin is low (new data is available).
@@ -154,8 +171,9 @@ public:
      *        Call manually after a read pause. This never waits for DRDY and
      *        does not replace the filter-settling guard after reconfiguration.
      *        See datasheet Section 8.5.1.9.1 "Collecting Data After a Pause".
+     * @return True if both frame transfers completed.
      */
-    void drainFIFO();
+    bool drainFIFO();
 
     /**
      * @brief Strobes the SYNC/RESET pin to clear FIFO and resynchronize.
@@ -185,7 +203,15 @@ private:
 
     void _startMasterClock();
     int32_t _signExtend24(uint32_t raw);
-    void _transferFrame();
+    bool _transferFrame();
+
+#if defined(ARDUINO_ARCH_ESP32)
+    bool _arduinoStarted = false;
+    spi_host_device_t _dmaHost = SPI2_HOST;
+    spi_device_handle_t _dmaDevice = nullptr;
+    uint8_t *_dmaBuffers = nullptr;
+    void _releaseDMA();
+#endif
 };
 
 #endif // ADS131M08_H

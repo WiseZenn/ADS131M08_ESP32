@@ -6,6 +6,8 @@
 class BLECharacteristic;
 class BLEServer;
 struct BLECharacteristicCallbacks {
+    enum Status { SUCCESS_NOTIFY, ERROR_GATT };
+    virtual void onStatus(BLECharacteristic *, Status, uint32_t) {}
     virtual ~BLECharacteristicCallbacks() = default;
     virtual void onWrite(BLECharacteristic *) {}
 };
@@ -20,9 +22,14 @@ public:
     BLECharacteristicCallbacks *callbacks = nullptr;
     std::vector<uint8_t> value;
     int notifications = 0;
+    bool refuseNotify = false;
     void setValue(uint8_t *data, size_t size) { value.assign(data, data + size); }
     std::string getValue() const { return {value.begin(), value.end()}; }
-    void notify() { ++notifications; }
+    void notify() {
+        if (!refuseNotify) ++notifications;
+        if (callbacks) callbacks->onStatus(this, refuseNotify ? BLECharacteristicCallbacks::ERROR_GATT
+                                                              : BLECharacteristicCallbacks::SUCCESS_NOTIFY, 0);
+    }
     void addDescriptor(void *) {}
     void setCallbacks(BLECharacteristicCallbacks *cb) { callbacks = cb; }
     void write(const std::vector<uint8_t> &data) {
@@ -46,6 +53,9 @@ class BLEServer {
 public:
     BLEServerCallbacks *callbacks = nullptr;
     int advertisements = 0;
+    uint16_t mtu = 256;
+    uint16_t getConnId() { return 0; }
+    uint16_t getPeerMTU(uint16_t) { return mtu; }
     void setCallbacks(BLEServerCallbacks *cb) { callbacks = cb; }
     BLEService *createService(const char *) { return new BLEService; }
     void startAdvertising() { ++advertisements; }

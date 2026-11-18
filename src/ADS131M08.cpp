@@ -5,6 +5,16 @@
 
 #include "ADS131M08.h"
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include <esp_heap_caps.h>
+
+// DMA can write a complete word past the last two bytes of the 30-byte
+// receive frame. Both buffers have their own aligned 32 bytes; the wire
+// transaction remains exactly 240 bits.
+static constexpr size_t DMA_FRAME_CAPACITY = 32;
+static_assert(ADS131_FRAME_BYTES <= DMA_FRAME_CAPACITY, "DMA frame capacity");
+#endif
+
 ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi_pin, int8_t miso_pin, int8_t sclk_pin, SPIClass *spiBus)
     : ADS131M08(clk_pin, cs_pin, drdy_pin, mosi_pin, miso_pin, sclk_pin, -1, spiBus) {}
 
@@ -19,8 +29,56 @@ ADS131M08::ADS131M08(int8_t clk_pin, int8_t cs_pin, int8_t drdy_pin, int8_t mosi
 }
 
 ADS131M08::~ADS131M08() {
-    _spi = nullptr; // We don't own the SPI object
+#if defined(ARDUINO_ARCH_ESP32)
+    _releaseDMA();
+#endif
 }
+
+#if defined(ARDUINO_ARCH_ESP32)
+bool ADS131M08::beginDMA(spi_host_device_t host) {
+    if (_arduinoStarted || _dmaDevice != nullptr) return false;
+
+    spi_bus_config_t bus = {};
+    bus.mosi_io_num = _pin_mosi;
+    bus.miso_io_num = _pin_miso;
+    bus.sclk_io_num = _pin_sclk;
+    bus.quadwp_io_num = -1;
+    bus.quadhd_io_num = -1;
+    bus.data4_io_num = -1;
+    bus.data5_io_num = -1;
+    bus.data6_io_num = -1;
+    bus.data7_io_num = -1;
+    bus.max_transfer_sz = DMA_FRAME_CAPACITY;
+    if (spi_bus_initialize(host, &bus, SPI_DMA_CH_AUTO) != ESP_OK) return false;
+
+    _dmaHost = host;
+    spi_device_interface_config_t device = {};
+    device.mode = 1;
+    device.clock_speed_hz = 16000000;
+    device.spics_io_num = _pin_cs;
+    device.cs_ena_posttrans = 1;
+    device.queue_size = 1;
+    if (spi_bus_add_device(host, &device, &_dmaDevice) != ESP_OK) {
+        spi_bus_free(host);
+        return false;
+    }
+
+    _dmaBuffers = static_cast<uint8_t *>(heap_caps_aligned_alloc(
+        DMA_FRAME_CAPACITY, 2 * DMA_FRAME_CAPACITY, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    if (_dmaBuffers != nullptr && begin()) return true;
+    _releaseDMA();
+    return false;
+}
+
+void ADS131M08::_releaseDMA() {
+    if (_dmaDevice == nullptr) return;
+    spi_bus_remove_device(_dmaDevice);
+    spi_bus_free(_dmaHost);
+    heap_caps_free(_dmaBuffers);
+    _dmaDevice = nullptr;
+    _dmaBuffers = nullptr;
+}
+#endif
 
 void ADS131M08::_startMasterClock() {
     // Generate 8MHz MCLK using ESP32 LEDC with 1-bit resolution.
@@ -38,31 +96,45 @@ bool ADS131M08::begin() {
         delay(50); // Allow clock and internal 1.8V LDO to stabilize
     }
 
-    // 2. Initialize GPIOs
-    pinMode(_pin_cs, OUTPUT);
-    digitalWrite(_pin_cs, HIGH);
+    // DMA drives chip select through the SPI peripheral.
+#if defined(ARDUINO_ARCH_ESP32)
+    if (_dmaDevice == nullptr)
+#endif
+    {
+        pinMode(_pin_cs, OUTPUT);
+        digitalWrite(_pin_cs, HIGH);
+    }
     pinMode(_pin_drdy, INPUT); // Do NOT use pull-up, DRDY is actively driven by default
     if (_pin_reset >= 0) {
         pinMode(_pin_reset, OUTPUT);
         digitalWrite(_pin_reset, HIGH); // Idle high (active low)
     }
 
-    // 3. Initialize SPI with user-provided pins
-    _spi->begin(_pin_sclk, _pin_miso, _pin_mosi, _pin_cs);
+    // 3. Initialize Arduino SPI only when the IDF transport is not in use.
+#if defined(ARDUINO_ARCH_ESP32)
+    if (_dmaDevice == nullptr)
+#endif
+    {
+        if (_spi == nullptr) return false;
+        _spi->begin(_pin_sclk, _pin_miso, _pin_mosi, _pin_cs);
+#if defined(ARDUINO_ARCH_ESP32)
+        _arduinoStarted = true;
+#endif
+    }
     delay(10);
 
     // 4. Send Software Reset Command (0x0011)
     memset(_txBuf, 0, ADS131_FRAME_BYTES);
     _txBuf[0] = 0x00;
     _txBuf[1] = 0x11;
-    _transferFrame();
+    if (!_transferFrame()) return false;
     delay(50); // Wait for reset to complete
 
     // 4b. Send UNLOCK Command (0x0655) to enable register writes
     memset(_txBuf, 0, ADS131_FRAME_BYTES);
     _txBuf[0] = 0x06;
     _txBuf[1] = 0x55;
-    _transferFrame();
+    if (!_transferFrame()) return false;
     delayMicroseconds(50);
 
     // 5. Verify communication by reading the ID register
@@ -82,15 +154,27 @@ bool ADS131M08::begin() {
         !readRegister(ADS131_REG_GAIN2, gain2) || gain1 != 0 || gain2 != 0) {
         return false;
     }
+    // ADC has been converting during reset/readback; clear both FIFO entries.
+    if (!drainFIFO()) return false;
     _currentGain = ADS131_GAIN_1X;
     memset(_offsets, 0, sizeof(_offsets));
-    // 6. Drain FIFO — ADC has been converting during steps 4-5, 2 stale samples accumulated
-    drainFIFO();
-
     return true;
 }
 
-void ADS131M08::_transferFrame() {
+bool ADS131M08::_transferFrame() {
+#if defined(ARDUINO_ARCH_ESP32)
+    if (_dmaDevice != nullptr) {
+        memcpy(_dmaBuffers, _txBuf, ADS131_FRAME_BYTES);
+        spi_transaction_t transfer = {};
+        transfer.length = ADS131_FRAME_BYTES * 8;
+        transfer.tx_buffer = _dmaBuffers;
+        transfer.rx_buffer = _dmaBuffers + DMA_FRAME_CAPACITY;
+        if (spi_device_transmit(_dmaDevice, &transfer) != ESP_OK) return false;
+        memcpy(_rxBuf, transfer.rx_buffer, ADS131_FRAME_BYTES);
+        return true;
+    }
+#endif
+    if (_spi == nullptr) return false;
     _spi->beginTransaction(_spiSettings);
     digitalWrite(_pin_cs, LOW);
     
@@ -99,6 +183,7 @@ void ADS131M08::_transferFrame() {
     
     digitalWrite(_pin_cs, HIGH);
     _spi->endTransaction();
+    return true;
 }
 
 bool ADS131M08::writeRegister(uint8_t regAddr, uint16_t regData) {
@@ -120,7 +205,7 @@ bool ADS131M08::writeRegister(uint8_t regAddr, uint16_t regData) {
     _txBuf[4] = regData & 0xFF;
     _txBuf[5] = 0x00;
     
-    _transferFrame();
+    if (!_transferFrame()) return false;
     delayMicroseconds(50); // Small delay to allow ADC to process
     return true;
 }
@@ -137,12 +222,12 @@ bool ADS131M08::readRegister(uint8_t regAddr, uint16_t &regData) {
     _txBuf[0] = (cmd >> 8) & 0xFF;
     _txBuf[1] = cmd & 0xFF;
     _txBuf[2] = 0x00;
-    _transferFrame();
+    if (!_transferFrame()) return false;
     delayMicroseconds(50);
     
     // Second Frame: Send NULL (all 0s) to clock out the response
     memset(_txBuf, 0, ADS131_FRAME_BYTES);
-    _transferFrame();
+    if (!_transferFrame()) return false;
     
     // The response is located in Word 0 of the second frame
     regData = (_rxBuf[0] << 8) | _rxBuf[1];
@@ -163,14 +248,12 @@ bool ADS131M08::setGain(ADS131_Gain_t gain) {
     uint16_t rb1 = 0, rb2 = 0;
     if (readRegister(ADS131_REG_GAIN1, rb1) &&
         readRegister(ADS131_REG_GAIN2, rb2)) {
-        if (rb1 == regData && rb2 == regData) {
+        if (rb1 == regData && rb2 == regData && drainFIFO()) {
             if (gain != _currentGain) {
                 // Offsets are raw codes measured at the previous gain.
                 memset(_offsets, 0, sizeof(_offsets));
             }
             _currentGain = gain;
-            // Clear buffered samples; the caller still handles filter settling.
-            drainFIFO();
             return true;
         }
     }
@@ -188,8 +271,7 @@ bool ADS131M08::setOSR(ADS131_OSR_t osr) {
     if (!writeRegister(ADS131_REG_CLOCK, clockReg)) return false;
 
     // Clear buffered samples; the caller still handles filter settling.
-    drainFIFO();
-    return true;
+    return drainFIFO();
 }
 
 bool ADS131M08::isDataReady() {
@@ -209,7 +291,7 @@ bool ADS131M08::readData(ADS131M08_Data &data) {
 
     // Send NULL command to read data
     memset(_txBuf, 0, ADS131_FRAME_BYTES);
-    _transferFrame();
+    if (!_transferFrame()) return false;
 
     // Parse channel data starting from Word 1 (byte 3)
     for (int i = 0; i < ADS131_NUM_CHANNELS; i++) {
@@ -224,25 +306,17 @@ bool ADS131M08::readData(ADS131M08_Data &data) {
 }
 
 void ADS131M08::calibrate(uint16_t samples) {
-    long sums[ADS131_NUM_CHANNELS] = {0};
-    memset(_offsets, 0, sizeof(_offsets));
-
-    // Drain stale samples before calibration
-    drainFIFO();
+    if (samples == 0 || !drainFIFO()) return;
+    int64_t sums[ADS131_NUM_CHANNELS] = {0};
 
     for (uint16_t k = 0; k < samples; k++) {
-        // Use yield() instead of delay(1) to prevent RTOS watchdog trigger 
-        // and to avoid missing fast DRDY pulses.
-        while (!isDataReady()) { yield(); } 
-        
-        ADS131M08_Data tempData;
-        readData(tempData); 
-        
+        while (!isDataReady()) { yield(); }
+        ADS131M08_Data data;
+        if (!readData(data)) return; // Preserve offsets if the transport fails.
         for (int i = 0; i < ADS131_NUM_CHANNELS; i++) {
-            sums[i] += tempData.ch[i];
+            sums[i] += data.ch[i] + _offsets[i];
         }
     }
-
     for (int i = 0; i < ADS131_NUM_CHANNELS; i++) {
         _offsets[i] = sums[i] / samples;
     }
@@ -263,13 +337,12 @@ float ADS131M08::rawToVoltage(int32_t raw) {
     return ((float)raw / ADS131_RESOLUTION) * (ADS131_V_REF / gainMultiplier);
 }
 
-void ADS131M08::drainFIFO() {
+bool ADS131M08::drainFIFO() {
     // TI section 8.5.1.9.1 requires two consecutive reads. Do not wait for
     // another DRDY edge: its pulse between buffered frames can be very narrow.
     // Empty-FIFO output is discarded, and this does not wait for filter settling.
     memset(_txBuf, 0, ADS131_FRAME_BYTES);
-    _transferFrame();
-    _transferFrame();
+    return _transferFrame() && _transferFrame();
 }
 
 void ADS131M08::syncReset() {
@@ -289,7 +362,7 @@ void ADS131M08::syncReset() {
     memset(_txBuf, 0, ADS131_FRAME_BYTES);
     _txBuf[0] = 0x06;
     _txBuf[1] = 0x55;
-    _transferFrame();
+    if (!_transferFrame()) return;
     delayMicroseconds(50);
 
     // Publish reset scaling only after the reset defaults are verified.

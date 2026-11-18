@@ -1,13 +1,19 @@
 """Exercise real client transactions against a deterministic asynchronous GATT peer."""
 
+import argparse
 import asyncio
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 import struct
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples/BLEGainControl"))
-from client import CONFIG_UUID, DATA_UUID, GainConfig, GainStream  # noqa: E402
+from client import CAPTURE_UUID, CONFIG_UUID, DATA_UUID, GainConfig, GainStream, main  # noqa: E402
 
 
 def config_payload(code=5, verified=1, version=1, flags=1):
@@ -47,7 +53,7 @@ class FakeClient:
 
     async def write_gatt_char(self, uuid, payload, *, response):
         assert response is True
-        assert DATA_UUID not in self.callbacks
+        assert DATA_UUID not in self.callbacks and CAPTURE_UUID not in self.callbacks
         self.calls.append(("write", payload[0]))
         self.written.set()
         if self.write_error:
@@ -253,6 +259,75 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "protocol version 1"):
             await stream.start()
         self.assertNotIn(DATA_UUID, peer.callbacks)
+
+
+class CaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_preserves_all_samples_and_expires_on_gain_change(self):
+        peer = FakeClient()
+        samples = []
+        stream = GainStream(peer, self.fail,
+                            on_capture=lambda sequence, read_us, raw, config: samples.append(
+                                (sequence, read_us, raw[0], config.code)
+                            ))
+        await stream.start()
+        self.assertNotIn(DATA_UUID, peer.callbacks)
+
+        def batch(start, first_us, count):
+            return bytearray(b"".join(
+                struct.pack("<II8i", start + i, first_us + 2048 * i, -(i + 1), *([0] * 7))
+                for i in range(count)
+            ))
+
+        receive = peer.callbacks[CAPTURE_UUID]
+        receive(CAPTURE_UUID, batch(10, 1000, 6))
+        self.assertEqual(samples, [(10 + i, 1000 + 2048 * i, -i - 1, 5) for i in range(6)])
+        await stream.set_gain(3)
+        receive(CAPTURE_UUID, batch(16, 16000, 2))
+        self.assertEqual(len(samples), 6)
+        peer.callbacks[CAPTURE_UUID](CAPTURE_UUID, batch(18, 20000, 1))
+        self.assertEqual(samples[-1], (18, 20000, -1, 3))
+
+        with self.assertRaisesRegex(ValueError, "40-byte capture records"):
+            peer.callbacks[CAPTURE_UUID](CAPTURE_UUID, bytearray(39))
+
+    async def test_capture_cli_distinguishes_link_loss_from_normal_shutdown(self):
+        class RecordingPeer(FakeClient):
+            def __init__(self, _, *, disconnected_callback):
+                super().__init__()
+                self.report_disconnected = disconnected_callback
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                self.disconnect()
+
+            def disconnect(self):
+                if self.is_connected:
+                    self.is_connected = False
+                    self.report_disconnected(self)
+
+            async def start_notify(self, uuid, callback):
+                await super().start_notify(uuid, callback)
+                if uuid == CAPTURE_UUID:
+                    callback(uuid, bytearray(struct.pack("<II8i", 1, 2048, *([0] * 8))))
+                    if drop_link:
+                        asyncio.get_running_loop().call_soon(self.disconnect)
+
+        bleak = SimpleNamespace(BleakClient=RecordingPeer, BleakScanner=None)
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(sys.modules, {"bleak": bleak}):
+            for drop_link in (True, False):
+                with self.subTest(drop_link=drop_link), redirect_stdout(StringIO()) as stdout:
+                    output = Path(temporary) / f"capture-{drop_link}.csv"
+                    args = argparse.Namespace(address="fake", capture_csv=output,
+                                              seconds=60 if drop_link else 0.01, gain=[])
+                    if drop_link:
+                        with self.assertRaisesRegex(ConnectionError, "Incomplete CSV"):
+                            await asyncio.wait_for(main(args), timeout=1)
+                    else:
+                        await main(args)
+                    self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 2)
+                    self.assertEqual("Captured 1 frames" in stdout.getvalue(), not drop_link)
 
 
 if __name__ == "__main__":

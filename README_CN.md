@@ -2,7 +2,7 @@
 
 [![Arduino](https://img.shields.io/badge/Arduino-ESP32-blue.svg)](https://github.com/espressif/arduino-esp32)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.2.0-orange.svg)](library.properties)
+[![Version](https://img.shields.io/badge/version-3.0.0-orange.svg)](library.properties)
 
 [🇬🇧 English](README.md) | [🇨🇳 中文](README_CN.md)
 
@@ -146,7 +146,7 @@ ADS131M08 每通道有 2 级 FIFO。库会在 `begin()`、`setGain()`、`setOSR(
 
 ```cpp
 // 暂停读取后排空 FIFO：
-adc.drainFIFO();  // 读取 2 帧虚拟数据，清除陈旧数据
+adc.drainFIFO();  // 读取 2 帧以清除陈旧数据；传输失败时返回 false
 // 等待 DRDY 后，再读取下一个采样。
 ```
 
@@ -199,7 +199,13 @@ f_DATA = f_MOD / OSR
 
 默认 SPI 时钟为 **16 MHz**（数据手册规定 3.3V DVDD 下最高 25 MHz）。
 
-每帧 SPI 数据为 10 字 × 24 位 = **240 个时钟周期**。在 16 MHz 下，一帧耗时 **15 μs**，在 32 kSPS（OSR=128）的 31.25 μs 窗口内绰绰有余。
+每帧 SPI 数据为 10 字 × 24 位，共 240 个时钟周期。16 MHz 下的线速传输时间约 **15 μs**，实际读帧还包括调度和 SPI 驱动开销。
+
+### DRDY、DMA 和 BLE 录数
+
+`begin()` 保留 Arduino SPI，`beginDMA()` 使用 ESP-IDF 的 SPI 主机 DMA。DMA 端需要独占所选 SPI host 和引脚，默认 SPI2，不能与同一 host 上的 Arduino SPI 混用。调用方仍需等待 DRDY，并串行执行读帧、PGA 修改和寄存器访问。短帧用 DMA 是否降低总延迟需要测量。参见 [ESP-IDF SPI Master 文档](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/api-reference/peripherals/spi_master.html)。
+
+[BLEGainControl](examples/BLEGainControl/README.md) 用 DRDY 中断唤醒采集任务，独立发送 BLE。它保留 RH56 的 36 字节 Data 通知，并提供分批采集通知、CSV 录数和丢帧计数。测试 DMA 版本时编译选项为 `-DADS131_BLE_USE_DMA=1`。
 
 如果使用杜邦线或面包板，走线尽量短，避免高频信号完整性问题。
 
